@@ -6,10 +6,13 @@ import os
 import sys
 import time
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import ttk, messagebox, filedialog
 
 from PIL import ImageTk
+
+DONATE_URL = "https://ko-fi.com/yoshines62000"
 
 from capture import Step, render_step_image, move_step, delete_step, sanitize_filename, get_window_at_point
 from recorder import Recorder
@@ -48,6 +51,12 @@ class GuideExpressApp(tk.Tk):
         self._thumbnail_refs: list = []
         self._container = ttk.Frame(self)
         self._container.pack(fill="both", expand=True)
+
+        bottom_bar = ttk.Frame(self)
+        bottom_bar.pack(fill="x", side="bottom")
+        donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground="#0645AD", cursor="hand2")
+        donate_label.pack(side="right", padx=8, pady=4)
+        donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_start_view()
