@@ -85,6 +85,7 @@ class GuideExpressApp(tk.Tk):
         ttk.Entry(frame, textvariable=self.title_var, width=50).pack(anchor="w", pady=(2, 20))
 
         ttk.Button(frame, text="Demarrer l'enregistrement", command=self._start_recording).pack(anchor="w")
+        ttk.Button(frame, text="Gerer les sessions enregistrees", command=self._build_sessions_view).pack(anchor="w", pady=(8, 0))
 
         privacy = ttk.LabelFrame(frame, text="Confidentialite", padding=12)
         privacy.pack(fill="x", pady=(30, 0))
@@ -98,6 +99,76 @@ class GuideExpressApp(tk.Tk):
             ),
             justify="left",
         ).pack(anchor="w")
+
+    # ------------------------------------------------------------------
+    # Gestion des sessions enregistrees (captures brutes sur le disque)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _list_sessions():
+        if not SESSIONS_DIR.exists():
+            return []
+        sessions = []
+        for entry in sorted(SESSIONS_DIR.iterdir(), reverse=True):
+            if not entry.is_dir():
+                continue
+            files = [f for f in entry.rglob("*") if f.is_file()]
+            size = sum(f.stat().st_size for f in files)
+            sessions.append((entry, len(files), size))
+        return sessions
+
+    def _build_sessions_view(self):
+        self._clear_container()
+        frame = ttk.Frame(self._container, padding=20)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="Gerer les sessions enregistrees", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        ttk.Label(
+            frame,
+            text=(
+                f"Captures brutes stockees dans {SESSIONS_DIR} - GuideExpress ne les supprime\n"
+                "jamais automatiquement. Supprimez ici celles qui ne sont plus necessaires."
+            ),
+            foreground="#666", justify="left",
+        ).pack(anchor="w", pady=(4, 12))
+
+        columns = ("session", "files", "size")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", height=14)
+        for col, label, width in [("session", "Session", 220), ("files", "Fichiers", 100), ("size", "Taille", 100)]:
+            tree.heading(col, text=label)
+            tree.column(col, width=width, anchor="w")
+        tree.pack(fill="both", expand=True)
+
+        sessions = self._list_sessions()
+        for path, file_count, size_bytes in sessions:
+            tree.insert("", "end", iid=str(path), values=(path.name, file_count, f"{size_bytes / 1024:.0f} Ko"))
+
+        if not sessions:
+            ttk.Label(frame, text="Aucune session enregistree pour le moment.", foreground="#666").pack(anchor="w", pady=10)
+
+        actions = ttk.Frame(frame)
+        actions.pack(fill="x", pady=(10, 0))
+        ttk.Button(
+            actions, text="Supprimer la session selectionnee",
+            command=lambda: self._delete_session(tree),
+        ).pack(side="left")
+        ttk.Button(actions, text="Retour", command=self._build_start_view).pack(side="right")
+
+    def _delete_session(self, tree):
+        selection = tree.selection()
+        if not selection:
+            messagebox.showinfo("Gerer les sessions", "Selectionnez une session d'abord.")
+            return
+        session_path = Path(selection[0])
+        if not messagebox.askyesno(
+            "Supprimer la session",
+            f"Supprimer definitivement la session '{session_path.name}' et toutes ses captures ?\n"
+            "Cette action est irreversible.",
+        ):
+            return
+        import shutil
+        shutil.rmtree(session_path, ignore_errors=True)
+        self._build_sessions_view()
 
     # ------------------------------------------------------------------
     # Enregistrement
@@ -249,7 +320,7 @@ class GuideExpressApp(tk.Tk):
         row = ttk.Frame(parent, padding=8, relief="groove")
         row.pack(fill="x", pady=4, padx=2)
 
-        img = render_step_image(step, zoom=False)
+        img = render_step_image(step, zoom=step.zoom)
         img.thumbnail(THUMBNAIL_MAX_SIZE)
         photo = ImageTk.PhotoImage(img)
         self._thumbnail_refs.append(photo)
@@ -263,6 +334,12 @@ class GuideExpressApp(tk.Tk):
         entry.pack(anchor="w", fill="x", pady=(2, 0))
         entry.bind("<FocusOut>", lambda e, s=step, v=desc_var: setattr(s, "description", v.get()))
         entry.bind("<Return>", lambda e, s=step, v=desc_var: setattr(s, "description", v.get()))
+        zoom_var = tk.BooleanVar(value=step.zoom)
+        zoom_check = ttk.Checkbutton(
+            mid, text="Zoomer sur la zone du clic", variable=zoom_var,
+            command=lambda s=step, v=zoom_var, i=index: self._toggle_zoom(i, s, v),
+        )
+        zoom_check.pack(anchor="w", pady=(4, 0))
 
         btns = ttk.Frame(row)
         btns.pack(side="right")
@@ -270,6 +347,10 @@ class GuideExpressApp(tk.Tk):
         ttk.Button(btns, text="Bas", width=6, command=lambda i=index: self._move(i, +1)).pack(side="left", padx=2)
         ttk.Button(btns, text="Rediger", width=8, command=lambda i=index: self._open_redaction_editor(i)).pack(side="left", padx=2)
         ttk.Button(btns, text="Supprimer", width=9, command=lambda i=index: self._delete(i)).pack(side="left", padx=2)
+
+    def _toggle_zoom(self, index, step, zoom_var):
+        step.zoom = zoom_var.get()
+        self._build_review_view()
 
     def _move(self, index, direction):
         move_step(self.steps, index, direction)
@@ -288,6 +369,11 @@ class GuideExpressApp(tk.Tk):
     def _open_redaction_editor(self, index):
         step = self.steps[index]
         try:
+            # Toujours zoom=False ici, meme si step.zoom est active : les
+            # coordonnees de redaction sont stockees en absolu par rapport a
+            # l'image brute complete (voir capture.py), le zoom n'est qu'un
+            # cadrage applique a l'export/apercu final, jamais a l'espace de
+            # coordonnees d'edition.
             full_img = render_step_image(step, zoom=False)
         except (OSError, ValueError) as exc:
             # La capture brute a pu etre supprimee/corrompue depuis

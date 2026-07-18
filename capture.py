@@ -65,6 +65,10 @@ class Step:
     description: str = ""
     # Rectangles a masquer, en coordonnees absolues de l'image brute : (x1, y1, x2, y2).
     redactions: list = field(default_factory=list)
+    # Zoome sur la zone du clic a l'export (voir render_step_image) - utile
+    # pour un clic sur un petit element (icone, case a cocher) difficile a
+    # repérer sur une capture plein ecran.
+    zoom: bool = False
 
     def default_description(self) -> str:
         app = self.window_title.strip() or "une fenetre non identifiee"

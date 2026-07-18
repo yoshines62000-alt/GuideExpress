@@ -99,6 +99,40 @@ class ExportTestCase(unittest.TestCase):
         content = out.read_text(encoding="utf-8")
         self.assertIn("Bloc-notes", content)  # description par defaut de l'etape 2
 
+    def test_export_html_respects_per_step_zoom_flag(self):
+        # Une image assez grande pour qu'un recadrage zoome soit vraiment
+        # plus petit que l'image complete (voir capture._crop_zoomed_region,
+        # half_size=260 -> recadre a 520x520 max).
+        big_raw = self.tmp / "big_raw.png"
+        Image.new("RGB", (1000, 1000), color=(5, 5, 5)).save(big_raw)
+        zoomed_step = cap.Step(
+            index=1, raw_image_path=big_raw, click_x=500, click_y=500,
+            window_title="Fenetre", timestamp="t1", zoom=True,
+        )
+        flat_step = cap.Step(
+            index=2, raw_image_path=big_raw, click_x=500, click_y=500,
+            window_title="Fenetre", timestamp="t2", zoom=False,
+        )
+        zoomed_png = exp._step_to_png_bytes(zoomed_step, zoom=zoomed_step.zoom)
+        flat_png = exp._step_to_png_bytes(flat_step, zoom=flat_step.zoom)
+
+        zoomed_img = Image.open(__import__("io").BytesIO(zoomed_png))
+        flat_img = Image.open(__import__("io").BytesIO(flat_png))
+        self.assertEqual(zoomed_img.size, (520, 520))
+        self.assertEqual(flat_img.size, (1000, 1000))
+
+    def test_export_markdown_uses_step_zoom_setting(self):
+        big_raw = self.tmp / "big_raw2.png"
+        Image.new("RGB", (1000, 1000), color=(5, 5, 5)).save(big_raw)
+        zoomed_step = cap.Step(
+            index=1, raw_image_path=big_raw, click_x=500, click_y=500,
+            window_title="Fenetre", timestamp="t1", zoom=True,
+        )
+        out_dir = self.tmp / "export_zoom_md"
+        exp.export_markdown([zoomed_step], "Titre", out_dir)
+        with Image.open(out_dir / "images" / "etape-001.png") as img:
+            self.assertEqual(img.size, (520, 520))
+
     def test_reexport_to_same_directory_removes_stale_images(self):
         # Un premier export avec 2 etapes, puis un reexport (meme dossier)
         # avec une seule etape : l'image de l'ancienne etape 2 ne doit pas

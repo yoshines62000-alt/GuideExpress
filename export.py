@@ -21,7 +21,7 @@ def export_html(steps: list, title: str, output_path: Path) -> None:
     fichier a partager, rien a oublier)."""
     sections = []
     for step in steps:
-        png_bytes = _step_to_png_bytes(step)
+        png_bytes = _step_to_png_bytes(step, zoom=step.zoom)
         b64 = base64.b64encode(png_bytes).decode("ascii")
         sections.append(
             "<section class=\"step\">"
@@ -67,7 +67,7 @@ def export_markdown(steps: list, title: str, output_dir: Path) -> Path:
     lines = [f"# {escape_markdown(title)}", "", f"{len(steps)} etape(s).", ""]
     for step in steps:
         image_name = f"etape-{step.index:03d}.png"
-        (images_dir / image_name).write_bytes(_step_to_png_bytes(step))
+        (images_dir / image_name).write_bytes(_step_to_png_bytes(step, zoom=step.zoom))
         lines.append(f"## Etape {step.index}")
         lines.append("")
         lines.append(escape_markdown(step.display_description()))
