@@ -1,10 +1,14 @@
-"""Export d'une session GuideExpress en guide autonome (HTML) ou en Markdown."""
+"""Export d'une session GuideExpress en guide autonome (HTML), en Markdown,
+ou en PDF (pret a imprimer/partager sans visionneuse HTML)."""
 
 from __future__ import annotations
 
 import base64
 import io
+import textwrap
 from pathlib import Path
+
+from PIL import Image, ImageDraw
 
 from capture import render_step_image, html_escape, escape_markdown
 
@@ -78,3 +82,49 @@ def export_markdown(steps: list, title: str, output_dir: Path) -> Path:
     md_path = output_dir / "guide.md"
     md_path.write_text("\n".join(lines), encoding="utf-8")
     return md_path
+
+
+_PDF_PAGE_MAX_WIDTH = 1400
+_PDF_TEXT_AREA_HEIGHT = 140
+
+
+def _latin1_safe(text: str) -> str:
+    """PIL utilise la police bitmap integree par defaut (jeu de caracteres
+    Latin-1) pour ImageDraw.text sans police externe fournie - un caractere
+    hors de ce jeu (emoji, certains guillemets typographiques) doit degrader
+    proprement (remplace par '?') plutot que de lever une exception."""
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
+def _step_to_pdf_page(step, title_prefix: str) -> Image.Image:
+    """Compose une page image : capture de l'etape en haut, titre et
+    description en dessous sur fond blanc (pret a etre assemble en PDF)."""
+    screenshot = render_step_image(step, zoom=step.zoom).convert("RGB")
+    if screenshot.width > _PDF_PAGE_MAX_WIDTH:
+        ratio = _PDF_PAGE_MAX_WIDTH / screenshot.width
+        screenshot = screenshot.resize((_PDF_PAGE_MAX_WIDTH, max(1, int(screenshot.height * ratio))))
+
+    page = Image.new("RGB", (screenshot.width, screenshot.height + _PDF_TEXT_AREA_HEIGHT), color="white")
+    page.paste(screenshot, (0, 0))
+    draw = ImageDraw.Draw(page)
+    draw.text((20, screenshot.height + 15), _latin1_safe(f"{title_prefix} {step.index}"), fill=(30, 30, 30))
+    wrapped = textwrap.wrap(_latin1_safe(step.display_description()), width=110) or [""]
+    for line_index, line in enumerate(wrapped[:3]):
+        draw.text((20, screenshot.height + 45 + line_index * 22), line, fill=(60, 60, 60))
+    return page
+
+
+def export_pdf(steps: list, title: str, output_path: Path) -> None:
+    """Genere un PDF autonome (une page par etape, capture + description),
+    via Pillow uniquement - aucune dependance PDF supplementaire."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if not steps:
+        # Une page de titre minimale plutot que planter, coherent avec le
+        # comportement de export_html/export_markdown sur une liste vide.
+        page = Image.new("RGB", (900, 200), color="white")
+        ImageDraw.Draw(page).text((20, 20), _latin1_safe(title) or "Guide", fill=(30, 30, 30))
+        page.save(output_path, format="PDF")
+        return
+
+    pages = [_step_to_pdf_page(step, "Etape") for step in steps]
+    pages[0].save(output_path, format="PDF", save_all=True, append_images=pages[1:])

@@ -14,9 +14,9 @@ from PIL import ImageTk
 
 DONATE_URL = "https://ko-fi.com/yoshines62000"
 
-from capture import Step, render_step_image, move_step, delete_step, sanitize_filename, get_window_at_point
+from capture import Step, render_step_image, move_step, move_step_to, delete_step, sanitize_filename, get_window_at_point
 from recorder import Recorder
-from export import export_html, export_markdown
+from export import export_html, export_markdown, export_pdf
 
 APP_DIR = Path.home() / ".guide_express"
 SESSIONS_DIR = APP_DIR / "sessions"
@@ -47,6 +47,8 @@ class GuideExpressApp(tk.Tk):
         self.steps: list = []
         self.recorder: Recorder | None = None
         self.hud: tk.Toplevel | None = None
+        self._retake_recorder: Recorder | None = None
+        self._retake_index: int | None = None
         self.title_var = tk.StringVar(value="Mon guide")
         self._thumbnail_refs: list = []
         self._container = ttk.Frame(self)
@@ -305,6 +307,8 @@ class GuideExpressApp(tk.Tk):
         if not self.steps:
             ttk.Label(inner, text="Aucune etape capturee (aucun clic detecte pendant l'enregistrement).").pack(pady=20)
 
+        self._row_frames = []
+        self._drag_index = None
         for i, step in enumerate(self.steps):
             self._build_step_row(inner, i)
 
@@ -314,11 +318,18 @@ class GuideExpressApp(tk.Tk):
         state = "normal" if self.steps else "disabled"
         ttk.Button(bottom, text="Exporter en HTML", command=self._export_html, state=state).pack(side="left", padx=6)
         ttk.Button(bottom, text="Exporter en Markdown", command=self._export_markdown, state=state).pack(side="left")
+        ttk.Button(bottom, text="Exporter en PDF", command=self._export_pdf, state=state).pack(side="left", padx=6)
 
     def _build_step_row(self, parent, index):
         step = self.steps[index]
         row = ttk.Frame(parent, padding=8, relief="groove")
         row.pack(fill="x", pady=4, padx=2)
+        self._row_frames.append(row)
+
+        grip = ttk.Label(row, text="⣿⣿", foreground="#888", cursor="fleur")
+        grip.pack(side="left", padx=(0, 8))
+        grip.bind("<ButtonPress-1>", lambda e, i=index: self._on_drag_start(i))
+        grip.bind("<ButtonRelease-1>", self._on_drag_drop)
 
         img = render_step_image(step, zoom=step.zoom)
         img.thumbnail(THUMBNAIL_MAX_SIZE)
@@ -346,6 +357,7 @@ class GuideExpressApp(tk.Tk):
         ttk.Button(btns, text="Haut", width=6, command=lambda i=index: self._move(i, -1)).pack(side="left", padx=2)
         ttk.Button(btns, text="Bas", width=6, command=lambda i=index: self._move(i, +1)).pack(side="left", padx=2)
         ttk.Button(btns, text="Rediger", width=8, command=lambda i=index: self._open_redaction_editor(i)).pack(side="left", padx=2)
+        ttk.Button(btns, text="Reprendre", width=9, command=lambda i=index: self._retake_step(i)).pack(side="left", padx=2)
         ttk.Button(btns, text="Supprimer", width=9, command=lambda i=index: self._delete(i)).pack(side="left", padx=2)
 
     def _toggle_zoom(self, index, step, zoom_var):
@@ -361,6 +373,124 @@ class GuideExpressApp(tk.Tk):
             return
         delete_step(self.steps, index)
         self._build_review_view()
+
+    # ------------------------------------------------------------------
+    # Reprise (re-capture) d'une seule etape, sans refaire tout l'enregistrement
+    # ------------------------------------------------------------------
+
+    def _retake_step(self, index):
+        step = self.steps[index]
+        self._retake_index = index
+        self.withdraw()
+        self._open_retake_hud(step)
+
+        self.hud.update_idletasks()
+        hud_cx = self.hud.winfo_rootx() + self.hud.winfo_width() // 2
+        hud_cy = self.hud.winfo_rooty() + self.hud.winfo_height() // 2
+        hud_hwnd = get_window_at_point(hud_cx, hud_cy)
+        excluded = {hud_hwnd} if hud_hwnd else set()
+        # Sous-dossier dedie aux reprises : un nouveau Recorder recommence sa
+        # propre numerotation a 1, qui ecraserait sinon le fichier de l'etape
+        # originale "step_0001_raw.png" du meme dossier de session.
+        retake_dir = step.raw_image_path.parent / "retakes"
+        self._retake_recorder = Recorder(retake_dir, excluded_hwnds=excluded)
+        self._retake_recorder.start()
+        self.after(150, self._poll_retake)
+
+    def _open_retake_hud(self, step):
+        self.hud = tk.Toplevel(self)
+        self.hud.title("GuideExpress")
+        self.hud.attributes("-topmost", True)
+        self.hud.resizable(False, False)
+        self.hud.protocol("WM_DELETE_WINDOW", self._cancel_retake)
+
+        frame = ttk.Frame(self.hud, padding=12)
+        frame.pack()
+        ttk.Label(
+            frame, text=f"Reprise de l'etape {step.index}", foreground="#c0392b", font=("Segoe UI", 10, "bold"),
+        ).pack()
+        ttk.Label(frame, text="Cliquez sur l'element a capturer...").pack(pady=(4, 8))
+        ttk.Button(frame, text="Annuler", command=self._cancel_retake).pack()
+
+        self.hud.update_idletasks()
+        screen_w = self.hud.winfo_screenwidth()
+        self.hud.geometry(f"+{screen_w - 260}+20")
+
+    def _poll_retake(self):
+        if self._retake_recorder is None:
+            return
+        if not self._retake_recorder.events.empty():
+            data = self._retake_recorder.events.get()
+            self._finish_retake(data)
+            return
+        if self._retake_recorder.is_active:
+            self.after(150, self._poll_retake)
+
+    def _finish_retake(self, data):
+        self._retake_recorder.stop()
+        self._retake_recorder.wait_for_pending_saves()
+        self._retake_recorder.shutdown()
+        self._retake_recorder = None
+
+        index = self._retake_index
+        self._retake_index = None
+        step = self.steps[index]
+        step.raw_image_path = data["raw_image_path"]
+        step.click_x = data["click_x"]
+        step.click_y = data["click_y"]
+        step.window_title = data["window_title"]
+        step.timestamp = data["timestamp"]
+        # Les rectangles de redaction sont en coordonnees absolues de
+        # l'ancienne capture : ils n'ont plus de sens sur la nouvelle image
+        # (fenetre/resolution potentiellement differentes), donc on les
+        # efface plutot que de risquer un masquage mal place ou manquant.
+        step.redactions = []
+
+        if self.hud is not None:
+            self.hud.destroy()
+            self.hud = None
+        self.deiconify()
+        self._build_review_view()
+
+    def _cancel_retake(self):
+        if self._retake_recorder is not None:
+            self._retake_recorder.stop()
+            self._retake_recorder.wait_for_pending_saves()
+            self._retake_recorder.shutdown()
+            self._retake_recorder = None
+        self._retake_index = None
+        if self.hud is not None:
+            self.hud.destroy()
+            self.hud = None
+        self.deiconify()
+
+    def _on_drag_start(self, index):
+        self._drag_index = index
+
+    def _on_drag_drop(self, event):
+        if self._drag_index is None:
+            return
+        drag_index = self._drag_index
+        self._drag_index = None
+        # event.x_root/y_root donnent la position ecran reelle du curseur au
+        # relachement, independamment du widget qui a recu l'evenement (le
+        # "grab" implicite de Tkinter livre toujours le ButtonRelease a la
+        # poignee ou le glisse a commence, pas au widget survole a la fin).
+        widget = self.winfo_containing(event.x_root, event.y_root)
+        target_index = self._row_index_of(widget)
+        if target_index is None or target_index == drag_index:
+            return
+        move_step_to(self.steps, drag_index, target_index)
+        self._build_review_view()
+
+    def _row_index_of(self, widget):
+        """Remonte la hierarchie de widgets depuis `widget` jusqu'a trouver
+        une des lignes d'etape connues, et renvoie sa position (0-based)."""
+        while widget is not None:
+            if widget in self._row_frames:
+                return self._row_frames.index(widget)
+            widget = widget.master
+        return None
 
     # ------------------------------------------------------------------
     # Editeur de redaction (masquage de zones sensibles)
@@ -497,11 +627,31 @@ class GuideExpressApp(tk.Tk):
             return
         messagebox.showinfo("Export termine", f"Guide exporte :\n{md_path}")
 
+    def _export_pdf(self):
+        safe_name = sanitize_filename(self.title_var.get())
+        path = filedialog.asksaveasfilename(
+            title="Exporter le guide en PDF",
+            defaultextension=".pdf",
+            filetypes=[("Document PDF", "*.pdf")],
+            initialfile=f"{safe_name}.pdf",
+        )
+        if not path:
+            return
+        try:
+            export_pdf(self.steps, self.title_var.get() or "Guide", Path(path))
+        except OSError as exc:
+            messagebox.showerror("Echec de l'export", f"Impossible d'ecrire le fichier :\n{exc}")
+            return
+        if messagebox.askyesno("Export termine", f"Guide exporte :\n{path}\n\nL'ouvrir maintenant ?"):
+            os.startfile(path)
+
     # ------------------------------------------------------------------
 
     def _on_close(self):
         if self.recorder is not None:
             self.recorder.shutdown()
+        if self._retake_recorder is not None:
+            self._retake_recorder.shutdown()
         if self.hud is not None:
             try:
                 self.hud.destroy()

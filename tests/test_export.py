@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from PIL import Image
+from pypdf import PdfReader
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -132,6 +133,47 @@ class ExportTestCase(unittest.TestCase):
         exp.export_markdown([zoomed_step], "Titre", out_dir)
         with Image.open(out_dir / "images" / "etape-001.png") as img:
             self.assertEqual(img.size, (520, 520))
+
+    def test_export_pdf_generates_one_page_per_step(self):
+        out = self.tmp / "guide.pdf"
+        exp.export_pdf(self.steps, "Mon Guide PDF", out)
+        self.assertTrue(out.exists())
+        content = out.read_bytes()
+        self.assertTrue(content.startswith(b"%PDF"))
+        self.assertEqual(len(PdfReader(str(out)).pages), len(self.steps))
+
+    def test_export_pdf_with_no_steps_still_produces_a_valid_file(self):
+        out = self.tmp / "guide_vide.pdf"
+        exp.export_pdf([], "Guide vide", out)
+        self.assertTrue(out.exists())
+        self.assertTrue(out.read_bytes().startswith(b"%PDF"))
+
+    def test_export_pdf_with_non_latin1_description_does_not_crash(self):
+        self.steps[0].description = "Étape spéciale — “test” ✨ 中文"
+        out = self.tmp / "guide_unicode.pdf"
+        exp.export_pdf(self.steps, "Titre", out)
+        self.assertTrue(out.exists())
+        self.assertTrue(out.read_bytes().startswith(b"%PDF"))
+
+    def test_export_pdf_respects_per_step_zoom_flag(self):
+        big_raw = self.tmp / "big_raw3.png"
+        Image.new("RGB", (1000, 1000), color=(5, 5, 5)).save(big_raw)
+        zoomed_step = cap.Step(
+            index=1, raw_image_path=big_raw, click_x=500, click_y=500,
+            window_title="Fenetre", timestamp="t1", zoom=True,
+        )
+        flat_step = cap.Step(
+            index=2, raw_image_path=big_raw, click_x=500, click_y=500,
+            window_title="Fenetre", timestamp="t2", zoom=False,
+        )
+        out = self.tmp / "guide_zoom.pdf"
+        exp.export_pdf([zoomed_step, flat_step], "Titre", out)
+        reader = PdfReader(str(out))
+        zoomed_width = reader.pages[0].mediabox.width
+        flat_width = reader.pages[1].mediabox.width
+        # La page zoomee (recadree a 520px) doit etre nettement plus etroite
+        # que la page non zoomee (recadree seulement a la largeur max de page).
+        self.assertLess(zoomed_width, flat_width)
 
     def test_reexport_to_same_directory_removes_stale_images(self):
         # Un premier export avec 2 etapes, puis un reexport (meme dossier)

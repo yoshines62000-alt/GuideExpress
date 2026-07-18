@@ -178,6 +178,21 @@ def move_step(steps: list, from_index: int, direction: int) -> list:
     return steps
 
 
+def move_step_to(steps: list, from_index: int, to_index: int) -> list:
+    """Deplace l'etape a la position `from_index` (0-based) directement a la
+    position `to_index`, en decalant les etapes intermediaires - contrairement
+    a move_step (echange avec le voisin immediat), l'etape peut ainsi sauter
+    plusieurs positions en un seul geste (utilise par le glisser-deposer)."""
+    if from_index == to_index:
+        return steps
+    if not (0 <= from_index < len(steps)) or not (0 <= to_index < len(steps)):
+        return steps
+    step = steps.pop(from_index)
+    steps.insert(to_index, step)
+    renumber(steps)
+    return steps
+
+
 def delete_step(steps: list, index: int) -> list:
     """Supprime l'etape a la position `index` (0-based) et renumerote."""
     if 0 <= index < len(steps):

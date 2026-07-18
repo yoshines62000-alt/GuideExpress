@@ -153,6 +153,34 @@ class ReorderingTestCase(unittest.TestCase):
         cap.move_step(steps, len(steps) - 1, +1)
         self.assertEqual(steps, before)
 
+    def test_move_step_to_moves_directly_to_target_position(self):
+        steps = self._steps(5)
+        original_first = steps[0]
+        cap.move_step_to(steps, 0, 3)
+        self.assertEqual(steps.index(original_first), 3)
+        self.assertEqual([s.index for s in steps], [1, 2, 3, 4, 5])
+
+    def test_move_step_to_moving_backward_shifts_others_down(self):
+        steps = self._steps(5)
+        original_last = steps[4]
+        cap.move_step_to(steps, 4, 0)
+        self.assertIs(steps[0], original_last)
+        self.assertEqual([s.index for s in steps], [1, 2, 3, 4, 5])
+
+    def test_move_step_to_same_index_is_a_no_op(self):
+        steps = self._steps(3)
+        before = list(steps)
+        cap.move_step_to(steps, 1, 1)
+        self.assertEqual(steps, before)
+
+    def test_move_step_to_rejects_out_of_range_indices(self):
+        steps = self._steps(3)
+        before = list(steps)
+        cap.move_step_to(steps, 0, 10)
+        self.assertEqual(steps, before)
+        cap.move_step_to(steps, -1, 1)
+        self.assertEqual(steps, before)
+
     def test_delete_step_renumbers_remaining(self):
         steps = self._steps(4)
         cap.delete_step(steps, 1)  # supprime l'etape d'index 2
