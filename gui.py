@@ -10,7 +10,7 @@ from tkinter import ttk, messagebox, filedialog
 
 from PIL import ImageTk
 
-from capture import Step, render_step_image, move_step, delete_step, sanitize_filename
+from capture import Step, render_step_image, move_step, delete_step, sanitize_filename, get_window_at_point
 from recorder import Recorder
 from export import export_html, export_markdown
 
@@ -83,12 +83,25 @@ class GuideExpressApp(tk.Tk):
 
     def _start_recording(self):
         session_dir = SESSIONS_DIR / time.strftime("%Y%m%d-%H%M%S")
-        self.recorder = Recorder(session_dir)
         self.steps = []
-        self.recorder.start()
 
         self.withdraw()
         self._open_hud()
+        # Exclut notre propre fenetre HUD des clics enregistres : sans ca,
+        # cliquer sur "Arreter l'enregistrement" ajouterait une derniere
+        # etape parasite au guide. Note : `winfo_id()` de Tkinter ne
+        # correspond PAS au HWND de haut niveau que Windows rapporte via
+        # WindowFromPoint (Tk cree une fenetre-cadre interne distincte) - on
+        # doit donc interroger l'OS sur un point reellement situe dans le
+        # HUD pour obtenir le HWND a comparer avec la meme logique que celle
+        # utilisee par le Recorder au moment du clic.
+        self.hud.update_idletasks()
+        hud_cx = self.hud.winfo_rootx() + self.hud.winfo_width() // 2
+        hud_cy = self.hud.winfo_rooty() + self.hud.winfo_height() // 2
+        hud_hwnd = get_window_at_point(hud_cx, hud_cy)
+        excluded = {hud_hwnd} if hud_hwnd else set()
+        self.recorder = Recorder(session_dir, excluded_hwnds=excluded)
+        self.recorder.start()
         self.after(150, self._poll_events)
 
     def _open_hud(self):

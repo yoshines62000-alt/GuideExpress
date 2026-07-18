@@ -18,7 +18,7 @@ from pathlib import Path
 from PIL import ImageGrab
 from pynput import mouse
 
-from capture import get_active_window_title
+from capture import get_window_at_point, get_window_title_at_point
 
 
 def _grab_screenshot():
@@ -47,7 +47,7 @@ class Recorder:
     saisir la capture en memoire et de la deleguer immediatement a un thread
     d'ecriture separe."""
 
-    def __init__(self, session_dir: Path):
+    def __init__(self, session_dir: Path, excluded_hwnds: frozenset = frozenset()):
         self.session_dir = session_dir
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.events: queue.Queue = queue.Queue()
@@ -55,6 +55,10 @@ class Recorder:
         self._listener = None
         self._active = False
         self._counter = 0
+        # Fenetres (HWND) a ignorer : nos propres fenetres (ex: le bouton
+        # "Arreter l'enregistrement"), pour ne pas polluer le guide d'une
+        # etape parasite montrant l'utilisateur en train d'arreter l'outil.
+        self.excluded_hwnds = frozenset(excluded_hwnds)
         self._writer_thread = threading.Thread(target=self._writer_loop, daemon=True)
         self._writer_thread.start()
 
@@ -106,6 +110,8 @@ class Recorder:
         # le travail lent (encodage, ecriture disque) est delegue.
         if not self._active or button != mouse.Button.left or not pressed:
             return
+        if self.excluded_hwnds and get_window_at_point(x, y) in self.excluded_hwnds:
+            return  # clic sur notre propre fenetre (ex: bouton Arreter) : ignore
         self._counter += 1
         idx = self._counter
         try:
@@ -118,7 +124,7 @@ class Recorder:
             "image": screenshot,
             "click_x": x,
             "click_y": y,
-            "window_title": get_active_window_title(),
+            "window_title": get_window_title_at_point(x, y),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         })
 

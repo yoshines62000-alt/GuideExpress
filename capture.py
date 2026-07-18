@@ -53,12 +53,9 @@ class Step:
         return self.description.strip() or self.default_description()
 
 
-def get_active_window_title() -> str:
-    """Titre de la fenetre active, via l'API Windows (ctypes, sans dependance externe).
-    Renvoie une chaine vide si indisponible (plateforme non-Windows, appel echoue)."""
+def _get_window_text(hwnd) -> str:
     try:
         user32 = ctypes.windll.user32
-        hwnd = user32.GetForegroundWindow()
         length = user32.GetWindowTextLengthW(hwnd)
         if length == 0:
             return ""
@@ -67,6 +64,36 @@ def get_active_window_title() -> str:
         return buffer.value
     except (AttributeError, OSError):
         return ""
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+def get_window_at_point(x: int, y: int) -> int:
+    """Handle (HWND) de la fenetre de plus haut niveau physiquement situee a
+    la position ecran donnee - independamment de savoir si cette fenetre a le
+    focus. Utilise pour exclure les clics sur nos propres fenetres (ex: le
+    bouton Arreter de l'enregistrement) sans dependre de la semantique du
+    focus, qui n'est pas fiable pour ce genre de verification.
+    Renvoie 0 si indisponible."""
+    try:
+        user32 = ctypes.windll.user32
+        pt = _POINT(x, y)
+        hwnd = user32.WindowFromPoint(pt)
+        if not hwnd:
+            return 0
+        GA_ROOT = 2
+        root = user32.GetAncestor(hwnd, GA_ROOT)
+        return root or hwnd
+    except (AttributeError, OSError):
+        return 0
+
+
+def get_window_title_at_point(x: int, y: int) -> str:
+    """Titre de la fenetre physiquement situee a la position ecran donnee."""
+    hwnd = get_window_at_point(x, y)
+    return _get_window_text(hwnd) if hwnd else ""
 
 
 def render_step_image(step: Step, zoom: bool = False) -> Image.Image:
