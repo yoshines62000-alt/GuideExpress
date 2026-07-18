@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import ctypes
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
@@ -198,6 +198,26 @@ def delete_step(steps: list, index: int) -> list:
     if 0 <= index < len(steps):
         del steps[index]
         renumber(steps)
+    return steps
+
+
+def duplicate_step(steps: list, index: int) -> list:
+    """Duplique l'etape a la position `index` (0-based) juste apres elle-meme,
+    et renumerote. Utile pour scinder une etape en deux instructions distinctes
+    sans reprendre une capture d'ecran (ex: "cliquez ici" puis, sur la meme
+    image, "verifiez que ceci apparait"). La copie partage volontairement le
+    meme fichier image brut que l'original (jamais modifie sur disque, voir
+    render_step_image) : aucune copie de fichier n'est necessaire, et une
+    reprise ulterieure sur l'une des deux etapes (voir _retake_step dans
+    gui.py) n'affecte que son propre `raw_image_path`, jamais celui de
+    l'autre. Les redactions sont copiees (liste independante) pour qu'editer
+    l'une des deux etapes ne modifie jamais l'autre."""
+    if not (0 <= index < len(steps)):
+        return steps
+    original = steps[index]
+    duplicate = replace(original, redactions=list(original.redactions))
+    steps.insert(index + 1, duplicate)
+    renumber(steps)
     return steps
 
 

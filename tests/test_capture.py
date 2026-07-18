@@ -192,6 +192,37 @@ class ReorderingTestCase(unittest.TestCase):
         cap.delete_step(steps, 99)
         self.assertEqual(len(steps), 2)
 
+    def test_duplicate_step_inserts_copy_right_after_and_renumbers(self):
+        steps = self._steps(3)
+        original_second = steps[1]
+        cap.duplicate_step(steps, 1)
+        self.assertEqual(len(steps), 4)
+        self.assertIs(steps[1], original_second)
+        self.assertIsNot(steps[2], original_second)
+        self.assertEqual(steps[2].raw_image_path, original_second.raw_image_path)
+        self.assertEqual([s.index for s in steps], [1, 2, 3, 4])
+
+    def test_duplicate_step_copies_description_and_zoom(self):
+        steps = self._steps(2)
+        steps[0].description = "Cliquez ici"
+        steps[0].zoom = True
+        cap.duplicate_step(steps, 0)
+        self.assertEqual(steps[1].description, "Cliquez ici")
+        self.assertTrue(steps[1].zoom)
+
+    def test_duplicate_step_redactions_are_an_independent_copy(self):
+        steps = self._steps(2)
+        steps[0].redactions = [(1, 1, 2, 2)]
+        cap.duplicate_step(steps, 0)
+        steps[1].redactions.append((5, 5, 6, 6))
+        self.assertEqual(steps[0].redactions, [(1, 1, 2, 2)])  # l'original n'est jamais touche
+        self.assertEqual(steps[1].redactions, [(1, 1, 2, 2), (5, 5, 6, 6)])
+
+    def test_duplicate_out_of_range_is_a_no_op(self):
+        steps = self._steps(2)
+        cap.duplicate_step(steps, 99)
+        self.assertEqual(len(steps), 2)
+
 
 class EscapingTestCase(unittest.TestCase):
     def test_markdown_escape_neutralizes_special_characters(self):

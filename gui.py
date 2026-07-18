@@ -14,7 +14,7 @@ from PIL import ImageTk
 
 DONATE_URL = "https://ko-fi.com/yoshines62000"
 
-from capture import Step, render_step_image, move_step, move_step_to, delete_step, sanitize_filename, get_window_at_point
+from capture import Step, render_step_image, move_step, move_step_to, delete_step, duplicate_step, sanitize_filename, get_window_at_point
 from recorder import Recorder
 from export import export_html, export_markdown, export_pdf
 
@@ -375,6 +375,7 @@ class GuideExpressApp(tk.Tk):
         ttk.Button(btns, text="Bas", width=6, command=lambda i=index: self._move(i, +1)).pack(side="left", padx=2)
         ttk.Button(btns, text="Rediger", width=8, command=lambda i=index: self._open_redaction_editor(i)).pack(side="left", padx=2)
         ttk.Button(btns, text="Reprendre", width=9, command=lambda i=index: self._retake_step(i)).pack(side="left", padx=2)
+        ttk.Button(btns, text="Dupliquer", width=9, command=lambda i=index: self._duplicate(i)).pack(side="left", padx=2)
         ttk.Button(btns, text="Supprimer", width=9, command=lambda i=index: self._delete(i)).pack(side="left", padx=2)
 
     def _toggle_zoom(self, index, step, zoom_var):
@@ -389,6 +390,13 @@ class GuideExpressApp(tk.Tk):
         if not messagebox.askyesno("Supprimer l'etape", "Supprimer cette etape du guide ?"):
             return
         delete_step(self.steps, index)
+        self._build_review_view()
+
+    def _duplicate(self, index):
+        # Utile pour scinder une etape en deux instructions distinctes sur la
+        # meme capture d'ecran (ex: "cliquez ici" puis "verifiez que ceci
+        # apparait"), sans avoir a reprendre une nouvelle capture.
+        duplicate_step(self.steps, index)
         self._build_review_view()
 
     # ------------------------------------------------------------------
