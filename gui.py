@@ -441,6 +441,18 @@ class GuideExpressApp(tk.Tk):
     def _finish_retake(self, data):
         self._retake_recorder.stop()
         self._retake_recorder.wait_for_pending_saves()
+        # Un clic supplementaire survenu pendant la fenetre de reprise (avant
+        # que stop() ne prenne effet, ex: double-clic) peut deja avoir ete
+        # capture et ecrit sur le disque - cette capture excedentaire n'est
+        # jamais referencee par aucune etape (seule la premiere, ci-dessus,
+        # est utilisee) : sans nettoyage, elle resterait orpheline sur le
+        # disque indefiniment.
+        while not self._retake_recorder.events.empty():
+            extra = self._retake_recorder.events.get()
+            try:
+                extra["raw_image_path"].unlink(missing_ok=True)
+            except OSError:
+                pass
         self._retake_recorder.shutdown()
         self._retake_recorder = None
 
@@ -468,6 +480,16 @@ class GuideExpressApp(tk.Tk):
         if self._retake_recorder is not None:
             self._retake_recorder.stop()
             self._retake_recorder.wait_for_pending_saves()
+            # Un clic peut avoir eu lieu juste avant l'annulation (capture
+            # deja ecrite sur le disque, mais pas encore consommee par
+            # _poll_retake) : sans nettoyage, ce fichier ne serait jamais
+            # rattache a aucune etape et resterait orphelin.
+            while not self._retake_recorder.events.empty():
+                extra = self._retake_recorder.events.get()
+                try:
+                    extra["raw_image_path"].unlink(missing_ok=True)
+                except OSError:
+                    pass
             self._retake_recorder.shutdown()
             self._retake_recorder = None
         self._retake_index = None
