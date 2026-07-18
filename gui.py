@@ -46,6 +46,7 @@ class GuideExpressApp(tk.Tk):
 
         self.steps: list = []
         self.recorder: Recorder | None = None
+        self.session_dir: Path | None = None
         self.hud: tk.Toplevel | None = None
         self._retake_recorder: Recorder | None = None
         self._retake_index: int | None = None
@@ -178,6 +179,7 @@ class GuideExpressApp(tk.Tk):
 
     def _start_recording(self):
         session_dir = SESSIONS_DIR / time.strftime("%Y%m%d-%H%M%S")
+        self.session_dir = session_dir
         self.steps = []
 
         self.withdraw()
@@ -389,10 +391,20 @@ class GuideExpressApp(tk.Tk):
         hud_cy = self.hud.winfo_rooty() + self.hud.winfo_height() // 2
         hud_hwnd = get_window_at_point(hud_cx, hud_cy)
         excluded = {hud_hwnd} if hud_hwnd else set()
-        # Sous-dossier dedie aux reprises : un nouveau Recorder recommence sa
-        # propre numerotation a 1, qui ecraserait sinon le fichier de l'etape
-        # originale "step_0001_raw.png" du meme dossier de session.
-        retake_dir = step.raw_image_path.parent / "retakes"
+        # Sous-dossier dedie aux reprises, propre a CETTE etape : un nouveau
+        # Recorder recommence sa propre numerotation a 1 a chaque reprise, ce
+        # qui ecraserait silencieusement la reprise d'une AUTRE etape si
+        # toutes les reprises partageaient le meme dossier "retakes" (bug
+        # trouve a l'audit). On cle donc ce sous-dossier sur le nom de
+        # fichier original de l'etape (unique dans la session, puisque
+        # attribue une seule fois par ordre croissant a l'enregistrement) -
+        # si l'etape a deja ete reprise au moins une fois, son
+        # raw_image_path pointe deja vers ce meme sous-dossier dedie, qu'on
+        # reutilise alors tel quel plutot que d'en imbriquer un nouveau.
+        if "retakes" in step.raw_image_path.parts:
+            retake_dir = step.raw_image_path.parent
+        else:
+            retake_dir = self.session_dir / "retakes" / step.raw_image_path.stem
         self._retake_recorder = Recorder(retake_dir, excluded_hwnds=excluded)
         self._retake_recorder.start()
         self.after(150, self._poll_retake)
