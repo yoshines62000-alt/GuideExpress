@@ -144,8 +144,14 @@ Lancer.bat            # raccourci de lancement double-clic (avec console, pour d
 GuideExpress.spec     # configuration de build PyInstaller (.exe autonome)
 icon.ico              # icone de l'application et de l'executable
 .gitignore
+LICENSE               # licence MIT
 README.md
 ```
+
+## Licence
+
+Ce projet est publié sous licence [MIT](LICENSE) : gratuit, open source, et
+libre de réutilisation, modification et redistribution.
 
 ## Soutenir le projet
 
