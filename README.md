@@ -137,6 +137,8 @@ requirements.txt      # dependances (Pillow, pynput)
 Lancer.vbs            # raccourci de lancement double-clic (sans console)
 Lancer.bat            # raccourci de lancement double-clic (avec console, pour debug)
 GuideExpress.spec     # configuration de build PyInstaller (.exe autonome)
+icon.ico              # icone de l'application et de l'executable
+.gitignore
 README.md
 ```
 

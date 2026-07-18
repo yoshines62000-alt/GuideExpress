@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 import tkinter as tk
 from pathlib import Path
@@ -21,12 +22,24 @@ THUMBNAIL_MAX_SIZE = (220, 150)
 EDITOR_MAX_SIZE = (980, 680)
 
 
+def _resource_path(name: str) -> Path:
+    """Chemin d'une ressource embarquee (ex: icon.ico), fonctionne aussi bien
+    lance depuis le code source qu'empaquete par PyInstaller (les fichiers de
+    donnees sont alors extraits dans un dossier temporaire sys._MEIPASS)."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / name
+
+
 class GuideExpressApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("GuideExpress - Guides pas-a-pas")
         self.geometry("760x560")
         self.minsize(620, 420)
+        try:
+            self.iconbitmap(str(_resource_path("icon.ico")))
+        except tk.TclError:
+            pass  # icone absente ou format non supporte : pas bloquant
 
         self.steps: list = []
         self.recorder: Recorder | None = None
