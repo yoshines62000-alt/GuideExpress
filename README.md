@@ -1,5 +1,10 @@
 # GuideExpress
 
+[![Dernière version](https://img.shields.io/github/v/release/yoshines62000-alt/GuideExpress?label=derni%C3%A8re%20version)](https://github.com/yoshines62000-alt/GuideExpress/releases/latest)
+[![Téléchargements](https://img.shields.io/github/downloads/yoshines62000-alt/GuideExpress/total?label=t%C3%A9l%C3%A9chargements)](https://github.com/yoshines62000-alt/GuideExpress/releases/latest)
+
+**[⬇️ Télécharger l'exécutable (.exe) — aucune installation requise](https://github.com/yoshines62000-alt/GuideExpress/releases/latest)**
+
 Générateur de guides pas-à-pas illustrés, à partir de vos clics réels — gratuit,
 open source, et 100 % local. Alternative libre à des outils comme
 [Scribe](https://scribe.com/) ou [Tango](https://www.tango.us/), qui facturent
@@ -33,12 +38,22 @@ Markdown.
 
 ## Démarrage rapide
 
-Double-cliquez sur **[`Lancer.vbs`](Lancer.vbs)** : la fenêtre de l'application
-s'ouvre directement, sans console. Si c'est la première fois, installez
-d'abord les dépendances (voir [Installation](#installation)).
+1. [**Téléchargez `GuideExpress.exe`**](https://github.com/yoshines62000-alt/GuideExpress/releases/latest)
+   depuis la dernière release.
+2. Double-cliquez dessus : la fenêtre de l'application s'ouvre directement,
+   sans installation, sans Python.
 
-Vous pouvez créer un raccourci sur le Bureau (clic droit sur `Lancer.vbs` →
-Envoyer vers → Bureau) pour un accès en un clic.
+L'exécutable n'étant pas signé numériquement, Windows SmartScreen peut
+afficher un avertissement au premier lancement : cliquez sur **Informations
+complémentaires** puis **Exécuter quand même**.
+
+## Lancer depuis le code source
+
+Alternative à l'exécutable, pour les développeurs ou par souci de
+transparence (voir [Installation](#installation) pour les dépendances) :
+double-cliquez sur **[`Lancer.vbs`](Lancer.vbs)** — la fenêtre s'ouvre
+directement, sans console. Vous pouvez créer un raccourci sur le Bureau (clic
+droit sur `Lancer.vbs` → Envoyer vers → Bureau) pour un accès en un clic.
 
 ## Installation
 
