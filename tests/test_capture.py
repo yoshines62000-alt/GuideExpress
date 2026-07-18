@@ -155,5 +155,19 @@ class EscapingTestCase(unittest.TestCase):
         self.assertIn("&quot;", escaped)
 
 
+class SanitizeFilenameTestCase(unittest.TestCase):
+    def test_replaces_invalid_windows_filename_characters(self):
+        result = cap.sanitize_filename('Guide: "Config" <prod>/backup\\test*?|')
+        for bad_char in '<>:"/\\|?*':
+            self.assertNotIn(bad_char, result)
+
+    def test_falls_back_to_default_when_empty(self):
+        self.assertEqual(cap.sanitize_filename(""), "guide")
+        self.assertEqual(cap.sanitize_filename("   "), "guide")
+
+    def test_leaves_normal_titles_unchanged(self):
+        self.assertEqual(cap.sanitize_filename("Guide utilisateur 2026"), "Guide utilisateur 2026")
+
+
 if __name__ == "__main__":
     unittest.main()

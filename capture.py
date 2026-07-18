@@ -157,3 +157,14 @@ def html_escape(text: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+
+
+_INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def sanitize_filename(name: str, fallback: str = "guide") -> str:
+    """Nettoie un titre de guide pour qu'il soit utilisable tel quel comme nom
+    de fichier ou de dossier Windows (le titre est saisi librement par
+    l'utilisateur et peut contenir des caracteres interdits comme '/' ou ':')."""
+    cleaned = _INVALID_FILENAME_CHARS.sub("_", name).strip(" .")
+    return cleaned or fallback

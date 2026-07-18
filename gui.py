@@ -10,7 +10,7 @@ from tkinter import ttk, messagebox, filedialog
 
 from PIL import ImageTk
 
-from capture import Step, render_step_image, move_step, delete_step
+from capture import Step, render_step_image, move_step, delete_step, sanitize_filename
 from recorder import Recorder
 from export import export_html, export_markdown
 
@@ -132,7 +132,10 @@ class GuideExpressApp(tk.Tk):
         if self.recorder is None:
             return
         self.recorder.stop()
-        self._drain_events()  # derniers evenements deposes juste avant l'arret
+        # Laisse le temps au thread d'ecriture de sauvegarder les captures
+        # prises juste avant l'arret, pour ne perdre aucune etape.
+        self.recorder.wait_for_pending_saves()
+        self._drain_events()
         if self.hud is not None:
             self.hud.destroy()
             self.hud = None
@@ -308,11 +311,12 @@ class GuideExpressApp(tk.Tk):
     # ------------------------------------------------------------------
 
     def _export_html(self):
+        safe_name = sanitize_filename(self.title_var.get())
         path = filedialog.asksaveasfilename(
             title="Exporter le guide en HTML",
             defaultextension=".html",
             filetypes=[("Page HTML", "*.html")],
-            initialfile=f"{self.title_var.get() or 'guide'}.html",
+            initialfile=f"{safe_name}.html",
         )
         if not path:
             return
@@ -324,14 +328,15 @@ class GuideExpressApp(tk.Tk):
         directory = filedialog.askdirectory(title="Choisir le dossier de destination pour le guide Markdown")
         if not directory:
             return
-        md_path = export_markdown(self.steps, self.title_var.get() or "Guide", Path(directory) / (self.title_var.get() or "guide"))
+        safe_name = sanitize_filename(self.title_var.get())
+        md_path = export_markdown(self.steps, self.title_var.get() or "Guide", Path(directory) / safe_name)
         messagebox.showinfo("Export termine", f"Guide exporte :\n{md_path}")
 
     # ------------------------------------------------------------------
 
     def _on_close(self):
         if self.recorder is not None:
-            self.recorder.stop()
+            self.recorder.shutdown()
         if self.hud is not None:
             try:
                 self.hud.destroy()
