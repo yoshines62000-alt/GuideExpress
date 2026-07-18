@@ -83,6 +83,22 @@ python -m pip install -r requirements.txt
   (`~/.guide_express/sessions/`) ; rien n'est exporté sans relecture explicite.
 - La rédaction de zones sensibles utilise un rectangle opaque, pas un flou.
 
+## Créer un exécutable autonome (.exe)
+
+Pour distribuer l'outil sans que le destinataire ait besoin d'installer
+Python ni les dépendances, un exécutable Windows autonome peut être généré
+avec [PyInstaller](https://pyinstaller.org/) :
+
+```bash
+python -m pip install pyinstaller
+python -m PyInstaller GuideExpress.spec
+```
+
+L'exécutable est produit dans `dist/GuideExpress.exe` (fichier unique, sans
+console). Le fichier `.spec` du dépôt fixe la configuration de build pour un
+résultat reproductible. Les dossiers `build/` et `dist/` ne sont pas suivis
+par Git.
+
 ## Tests
 
 Une suite de tests automatisés couvre la logique pure (rendu des annotations,
@@ -105,6 +121,7 @@ tests/                # tests automatises
 requirements.txt      # dependances (Pillow, pynput)
 Lancer.vbs            # raccourci de lancement double-clic (sans console)
 Lancer.bat            # raccourci de lancement double-clic (avec console, pour debug)
+GuideExpress.spec     # configuration de build PyInstaller (.exe autonome)
 README.md
 ```
 
