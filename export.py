@@ -57,6 +57,13 @@ def export_markdown(steps: list, title: str, output_dir: Path) -> Path:
     images_dir = output_dir / "images"
     images_dir.mkdir(exist_ok=True)
 
+    # Reexporter un guide plus court vers le meme dossier laisserait sinon
+    # trainer d'anciennes images (etape-004.png, etc.) qu'aucun guide.md ne
+    # reference plus. On ne supprime que nos propres fichiers reconnaissables
+    # (motif etape-NNN.png), jamais un fichier place la par l'utilisateur.
+    for stale in images_dir.glob("etape-*.png"):
+        stale.unlink(missing_ok=True)
+
     lines = [f"# {title}", "", f"{len(steps)} etape(s).", ""]
     for step in steps:
         image_name = f"etape-{step.index:03d}.png"

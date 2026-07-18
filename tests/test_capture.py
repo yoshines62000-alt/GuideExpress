@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image
 
@@ -75,10 +76,27 @@ class RenderStepImageTestCase(unittest.TestCase):
         self.assertEqual(img.getpixel((100, 90)), cap.REDACTION_COLOR)
 
     def test_zoom_crops_around_click(self):
+        # Image plus petite que la fenetre de recadrage : aucun recadrage
+        # possible, l'image entiere est renvoyee (comportement du code pour
+        # ce cas, deja verifie par les bornes ci-dessous).
         step = self._step(click_x=200, click_y=150)
         img = cap.render_step_image(step, zoom=True)
         self.assertLessEqual(img.width, 400)
         self.assertLessEqual(img.height, 300)
+
+    def test_zoom_crop_math_near_corners_and_center(self):
+        # Image nettement plus grande que la fenetre de recadrage : exerce
+        # reellement le calcul de bornes (evite les coordonnees negatives ou
+        # une zone de recadrage qui deborderait de l'image, notamment pour un
+        # clic tout pres d'un coin).
+        big_raw = self.tmp / "big.png"
+        Image.new("RGB", (1000, 800), color=(0, 128, 255)).save(big_raw)
+        expected_size = 2 * 260  # cf. capture._crop_zoomed_region half_size par defaut
+
+        for cx, cy in [(5, 5), (995, 795), (500, 400), (0, 0), (999, 799)]:
+            step = self._step(raw_image_path=big_raw, click_x=cx, click_y=cy)
+            img = cap.render_step_image(step, zoom=True)
+            self.assertEqual(img.size, (expected_size, expected_size), f"echec pour le clic ({cx},{cy})")
 
     def test_default_description_mentions_window_title(self):
         step = self._step(window_title="Google Chrome")
@@ -91,6 +109,15 @@ class RenderStepImageTestCase(unittest.TestCase):
     def test_display_description_uses_custom_text_when_set(self):
         step = self._step(description="Ouvrez le menu Fichier")
         self.assertEqual(step.display_description(), "Ouvrez le menu Fichier")
+
+    def test_render_raises_a_clear_error_when_raw_file_is_missing(self):
+        # Le fichier de capture brute peut avoir ete supprime/deplace apres
+        # l'enregistrement (nettoyage manuel du dossier de session). L'appelant
+        # (gui.py) attrape (OSError, ValueError) : verifie que c'est bien le
+        # type d'exception effectivement leve, pas un type inattendu.
+        step = self._step(raw_image_path=self.tmp / "n_existe_pas.png")
+        with self.assertRaises((OSError, ValueError)):
+            cap.render_step_image(step)
 
 
 class ReorderingTestCase(unittest.TestCase):
@@ -167,6 +194,42 @@ class SanitizeFilenameTestCase(unittest.TestCase):
 
     def test_leaves_normal_titles_unchanged(self):
         self.assertEqual(cap.sanitize_filename("Guide utilisateur 2026"), "Guide utilisateur 2026")
+
+    def test_windows_reserved_device_names_are_suffixed(self):
+        # CON, NUL, COM1... sont invalides comme nom de fichier/dossier
+        # Windows meme sans aucun caractere par ailleurs interdit.
+        for reserved in ("CON", "con", "PRN", "AUX", "NUL", "COM1", "LPT9"):
+            result = cap.sanitize_filename(reserved)
+            self.assertNotEqual(result.upper(), reserved.upper(), f"echec pour {reserved!r}")
+
+    def test_name_containing_reserved_word_is_not_affected(self):
+        # Seul le nom EXACT est reserve ; un titre qui le contient simplement
+        # ne doit pas etre modifie inutilement.
+        self.assertEqual(cap.sanitize_filename("Configuration"), "Configuration")
+
+
+class WindowLookupErrorHandlingTestCase(unittest.TestCase):
+    """Les appels Win32 (ctypes) doivent degrader proprement (chaine vide /
+    0) si l'OS renvoie une erreur, plutot que de laisser l'exception se
+    propager jusque dans le thread d'ecoute globale des clics."""
+
+    def test_get_window_at_point_returns_zero_on_os_error(self):
+        with mock.patch.object(cap, "_user32") as mock_user32:
+            mock_user32.WindowFromPoint.side_effect = OSError("echec simule")
+            self.assertEqual(cap.get_window_at_point(10, 10), 0)
+
+    def test_get_window_title_at_point_returns_empty_string_on_error(self):
+        with mock.patch.object(cap, "_user32") as mock_user32:
+            mock_user32.WindowFromPoint.side_effect = OSError("echec simule")
+            self.assertEqual(cap.get_window_title_at_point(10, 10), "")
+
+    def test_get_window_text_returns_empty_string_when_user32_unavailable(self):
+        with mock.patch.object(cap, "_user32", None):
+            self.assertEqual(cap._get_window_text(12345), "")
+
+    def test_get_window_at_point_returns_zero_when_user32_unavailable(self):
+        with mock.patch.object(cap, "_user32", None):
+            self.assertEqual(cap.get_window_at_point(10, 10), 0)
 
 
 if __name__ == "__main__":

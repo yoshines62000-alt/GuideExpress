@@ -126,6 +126,7 @@ class GuideExpressApp(tk.Tk):
         if self.recorder is None:
             return
         drained = self._drain_events()
+        self._drain_capture_errors()
         if drained and self.hud is not None:
             self.hud_count_var.set(f"{len(self.steps)} etape(s) capturee(s)")
         if self.recorder.is_active:
@@ -141,19 +142,45 @@ class GuideExpressApp(tk.Tk):
             drained = True
         return drained
 
+    def _drain_capture_errors(self) -> list:
+        """Recupere les erreurs de capture/ecriture survenues en arriere-plan
+        (voir Recorder.capture_errors), pour pouvoir les signaler a
+        l'utilisateur plutot que de les laisser disparaitre silencieusement."""
+        if self.recorder is None:
+            return []
+        messages = []
+        while not self.recorder.capture_errors.empty():
+            messages.append(self.recorder.capture_errors.get())
+        return messages
+
     def _stop_recording(self):
         if self.recorder is None:
             return
         self.recorder.stop()
         # Laisse le temps au thread d'ecriture de sauvegarder les captures
         # prises juste avant l'arret, pour ne perdre aucune etape.
-        self.recorder.wait_for_pending_saves()
+        fully_saved = self.recorder.wait_for_pending_saves()
         self._drain_events()
+        errors = self._drain_capture_errors()
         if self.hud is not None:
             self.hud.destroy()
             self.hud = None
         self.deiconify()
+        self.recorder = None
         self._build_review_view()
+
+        if not fully_saved:
+            messagebox.showwarning(
+                "Enregistrement",
+                "Certaines captures n'ont pas pu etre finalisees a temps : "
+                "il est possible qu'une etape manque a la fin du guide.",
+            )
+        if errors:
+            messagebox.showwarning(
+                "Erreurs de capture",
+                "Certains clics n'ont pas pu etre enregistres correctement :\n\n"
+                + "\n".join(errors),
+            )
 
     # ------------------------------------------------------------------
     # Ecran de relecture / edition
@@ -222,11 +249,6 @@ class GuideExpressApp(tk.Tk):
         ttk.Button(btns, text="Rediger", width=8, command=lambda i=index: self._open_redaction_editor(i)).pack(side="left", padx=2)
         ttk.Button(btns, text="Supprimer", width=9, command=lambda i=index: self._delete(i)).pack(side="left", padx=2)
 
-    def _sync_descriptions(self):
-        # Force la lecture des Entry meme si le focus n'en est jamais sorti
-        # (ex: l'utilisateur clique directement sur Exporter).
-        pass  # les descriptions sont deja synchronisees via FocusOut/Return ; voir _build_step_row
-
     def _move(self, index, direction):
         move_step(self.steps, index, direction)
         self._build_review_view()
@@ -243,12 +265,26 @@ class GuideExpressApp(tk.Tk):
 
     def _open_redaction_editor(self, index):
         step = self.steps[index]
+        try:
+            full_img = render_step_image(step, zoom=False)
+        except (OSError, ValueError) as exc:
+            # La capture brute a pu etre supprimee/corrompue depuis
+            # l'enregistrement (nettoyage manuel du dossier de session, etc.).
+            # Charger l'image AVANT d'ouvrir la fenetre modale (grab_set)
+            # evite de laisser l'application bloquee sur une boite vide si
+            # cet appel echoue.
+            messagebox.showerror(
+                "Image introuvable",
+                f"Impossible de charger la capture de l'etape {step.index} :\n{exc}",
+            )
+            return
+
         editor = tk.Toplevel(self)
         editor.title(f"Rediger - Etape {step.index}")
         editor.transient(self)
+        editor.protocol("WM_DELETE_WINDOW", lambda: self._close_editor(editor, index))
         editor.grab_set()
 
-        full_img = render_step_image(step, zoom=False)
         display_img = full_img.copy()
         display_img.thumbnail(EDITOR_MAX_SIZE)
         scale_x = full_img.width / display_img.width
@@ -333,7 +369,11 @@ class GuideExpressApp(tk.Tk):
         )
         if not path:
             return
-        export_html(self.steps, self.title_var.get() or "Guide", Path(path))
+        try:
+            export_html(self.steps, self.title_var.get() or "Guide", Path(path))
+        except OSError as exc:
+            messagebox.showerror("Echec de l'export", f"Impossible d'ecrire le fichier :\n{exc}")
+            return
         if messagebox.askyesno("Export termine", f"Guide exporte :\n{path}\n\nL'ouvrir maintenant ?"):
             os.startfile(path)
 
@@ -342,7 +382,11 @@ class GuideExpressApp(tk.Tk):
         if not directory:
             return
         safe_name = sanitize_filename(self.title_var.get())
-        md_path = export_markdown(self.steps, self.title_var.get() or "Guide", Path(directory) / safe_name)
+        try:
+            md_path = export_markdown(self.steps, self.title_var.get() or "Guide", Path(directory) / safe_name)
+        except OSError as exc:
+            messagebox.showerror("Echec de l'export", f"Impossible d'ecrire le guide :\n{exc}")
+            return
         messagebox.showinfo("Export termine", f"Guide exporte :\n{md_path}")
 
     # ------------------------------------------------------------------

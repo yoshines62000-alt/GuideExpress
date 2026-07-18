@@ -30,6 +30,27 @@ CLICK_MARKER_RADIUS = 22
 CLICK_MARKER_WIDTH = 4
 REDACTION_COLOR = (20, 20, 20)
 
+# Signatures explicites (argtypes/restype) pour les appels Win32 utilises plus
+# bas : sans elles, ctypes traite par defaut les HWND comme des c_int 32 bits
+# signes, ce qui pourrait mal se comporter pour une valeur de HWND >= 0x80000000
+# (improbable en pratique, mais peu couteux a fiabiliser). `_user32` vaut None
+# hors Windows ou si l'initialisation echoue ; chaque fonction ci-dessous gere
+# deja ce cas via son propre try/except.
+try:
+    import ctypes.wintypes as _wintypes
+    _user32 = ctypes.windll.user32
+    _user32.WindowFromPoint.argtypes = [_wintypes.POINT]
+    _user32.WindowFromPoint.restype = _wintypes.HWND
+    _user32.GetAncestor.argtypes = [_wintypes.HWND, ctypes.c_uint]
+    _user32.GetAncestor.restype = _wintypes.HWND
+    _user32.GetWindowTextLengthW.argtypes = [_wintypes.HWND]
+    _user32.GetWindowTextLengthW.restype = ctypes.c_int
+    _user32.GetWindowTextW.argtypes = [_wintypes.HWND, _wintypes.LPWSTR, ctypes.c_int]
+    _user32.GetWindowTextW.restype = ctypes.c_int
+except (AttributeError, OSError):
+    _wintypes = None
+    _user32 = None
+
 
 @dataclass
 class Step:
@@ -54,20 +75,17 @@ class Step:
 
 
 def _get_window_text(hwnd) -> str:
+    if _user32 is None or not hwnd:
+        return ""
     try:
-        user32 = ctypes.windll.user32
-        length = user32.GetWindowTextLengthW(hwnd)
+        length = _user32.GetWindowTextLengthW(hwnd)
         if length == 0:
             return ""
         buffer = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        _user32.GetWindowTextW(hwnd, buffer, length + 1)
         return buffer.value
     except (AttributeError, OSError):
         return ""
-
-
-class _POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
 def get_window_at_point(x: int, y: int) -> int:
@@ -77,14 +95,15 @@ def get_window_at_point(x: int, y: int) -> int:
     bouton Arreter de l'enregistrement) sans dependre de la semantique du
     focus, qui n'est pas fiable pour ce genre de verification.
     Renvoie 0 si indisponible."""
+    if _user32 is None:
+        return 0
     try:
-        user32 = ctypes.windll.user32
-        pt = _POINT(x, y)
-        hwnd = user32.WindowFromPoint(pt)
+        pt = _wintypes.POINT(x, y)
+        hwnd = _user32.WindowFromPoint(pt)
         if not hwnd:
             return 0
         GA_ROOT = 2
-        root = user32.GetAncestor(hwnd, GA_ROOT)
+        root = _user32.GetAncestor(hwnd, GA_ROOT)
         return root or hwnd
     except (AttributeError, OSError):
         return 0
@@ -188,10 +207,23 @@ def html_escape(text: str) -> str:
 
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
+# Noms reserves par Windows pour des peripheriques : invalides comme nom de
+# fichier/dossier meme sans aucun caractere interdit (ex: "CON.txt" echoue).
+_WINDOWS_RESERVED_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
+
 
 def sanitize_filename(name: str, fallback: str = "guide") -> str:
     """Nettoie un titre de guide pour qu'il soit utilisable tel quel comme nom
     de fichier ou de dossier Windows (le titre est saisi librement par
-    l'utilisateur et peut contenir des caracteres interdits comme '/' ou ':')."""
+    l'utilisateur et peut contenir des caracteres interdits comme '/' ou ':',
+    ou coincider avec un nom de peripherique reserve comme "CON")."""
     cleaned = _INVALID_FILENAME_CHARS.sub("_", name).strip(" .")
-    return cleaned or fallback
+    if not cleaned:
+        return fallback
+    if cleaned.upper() in _WINDOWS_RESERVED_NAMES:
+        return f"{cleaned}_"
+    return cleaned

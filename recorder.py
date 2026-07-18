@@ -37,7 +37,9 @@ class Recorder:
     """Ecoute les clics gauche globaux et sauvegarde une capture d'ecran brute
     pour chacun. Les evenements finalises sont deposes dans une file
     thread-safe (`events`) a consommer depuis le thread principal (ex: via Tk
-    `after()`), jamais lus directement depuis le thread d'ecoute.
+    `after()`), jamais lus directement depuis le thread d'ecoute. Les erreurs
+    (capture ou ecriture echouee) sont deposees dans `capture_errors`, a
+    afficher a l'utilisateur plutot qu'a laisser disparaitre silencieusement.
 
     Important : le callback appele par pynput s'execute dans le hook systeme
     bas-niveau de la souris. Windows impose un delai maximum de reponse a ce
@@ -51,10 +53,12 @@ class Recorder:
         self.session_dir = session_dir
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.events: queue.Queue = queue.Queue()
+        self.capture_errors: queue.Queue = queue.Queue()
         self._save_queue: queue.Queue = queue.Queue()
         self._listener = None
         self._active = False
         self._counter = 0
+        self._shut_down = False
         # Fenetres (HWND) a ignorer : nos propres fenetres (ex: le bouton
         # "Arreter l'enregistrement"), pour ne pas polluer le guide d'une
         # etape parasite montrant l'utilisateur en train d'arreter l'outil.
@@ -67,6 +71,8 @@ class Recorder:
         return self._active
 
     def start(self) -> None:
+        if self._shut_down:
+            raise RuntimeError("Ce Recorder a deja ete arrete definitivement (shutdown) ; creez-en un nouveau.")
         if self._active:
             return
         self._active = True
@@ -79,10 +85,13 @@ class Recorder:
             self._listener.stop()
             self._listener = None
 
-    def wait_for_pending_saves(self, timeout: float = 3.0) -> None:
+    def wait_for_pending_saves(self, timeout: float = 8.0) -> bool:
         """Attend que toutes les captures encore en attente d'ecriture disque
         soient traitees, pour ne perdre aucune etape prise juste avant l'arret.
         A appeler apres stop(), avant de considerer la session terminee.
+        Renvoie False si le delai est depasse (l'appelant doit alors prevenir
+        l'utilisateur qu'une etape pourrait manquer, plutot que de continuer
+        silencieusement comme si tout avait ete sauvegarde).
 
         Utilise `unfinished_tasks` plutot que `empty()` : `empty()` redevient
         vrai des qu'un element est retire de la file par `get()`, mais AVANT
@@ -92,12 +101,15 @@ class Recorder:
         deadline = time.time() + timeout
         while self._save_queue.unfinished_tasks > 0 and time.time() < deadline:
             time.sleep(0.02)
+        return self._save_queue.unfinished_tasks == 0
 
     def shutdown(self) -> None:
         """Arrete definitivement le thread d'ecriture (fin de vie du Recorder).
         Bloque jusqu'a ce que le thread ait reellement termine, pour un arret
-        deterministe (utile notamment dans les tests)."""
+        deterministe (utile notamment dans les tests). Ce Recorder ne peut
+        plus etre redemarre ensuite (voir start())."""
         self.stop()
+        self._shut_down = True
         self.wait_for_pending_saves()
         if self._writer_thread.is_alive():
             self._save_queue.put(None)
@@ -110,14 +122,20 @@ class Recorder:
         # le travail lent (encodage, ecriture disque) est delegue.
         if not self._active or button != mouse.Button.left or not pressed:
             return
-        if self.excluded_hwnds and get_window_at_point(x, y) in self.excluded_hwnds:
-            return  # clic sur notre propre fenetre (ex: bouton Arreter) : ignore
-        self._counter += 1
-        idx = self._counter
         try:
+            if self.excluded_hwnds and get_window_at_point(x, y) in self.excluded_hwnds:
+                return  # clic sur notre propre fenetre (ex: bouton Arreter) : ignore
+            self._counter += 1
+            idx = self._counter
             screenshot = _grab_screenshot()
-        except OSError:
-            self._counter -= 1
+        except Exception as exc:  # noqa: BLE001 - callback de hook systeme :
+            # une exception non geree ici tuerait le thread d'ecoute pynput
+            # sans que rien ne le signale a l'utilisateur (meme categorie de
+            # bug que les deux deja corriges dans ce projet). On avale
+            # l'exception, on la remonte via capture_errors, et le clic
+            # suivant continue d'etre traite normalement.
+            self._counter = max(0, self._counter - 1)
+            self.capture_errors.put(f"Capture d'un clic echouee : {exc}")
             return
         self._save_queue.put({
             "index": idx,
@@ -138,15 +156,17 @@ class Recorder:
             raw_path = self.session_dir / f"step_{idx:04d}_raw.png"
             try:
                 item["image"].save(raw_path)
-            except OSError:
+                self.events.put({
+                    "index": idx,
+                    "raw_image_path": raw_path,
+                    "click_x": item["click_x"],
+                    "click_y": item["click_y"],
+                    "window_title": item["window_title"],
+                    "timestamp": item["timestamp"],
+                })
+            except Exception as exc:  # noqa: BLE001 - une etape en echec ne doit
+                # jamais arreter le thread d'ecriture : les etapes suivantes
+                # doivent continuer a etre traitees normalement.
+                self.capture_errors.put(f"Etape {idx} non enregistree : {exc}")
+            finally:
                 self._save_queue.task_done()
-                continue
-            self.events.put({
-                "index": idx,
-                "raw_image_path": raw_path,
-                "click_x": item["click_x"],
-                "click_y": item["click_y"],
-                "window_title": item["window_title"],
-                "timestamp": item["timestamp"],
-            })
-            self._save_queue.task_done()

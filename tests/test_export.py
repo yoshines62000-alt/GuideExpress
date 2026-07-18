@@ -88,6 +88,18 @@ class ExportTestCase(unittest.TestCase):
         content = out.read_text(encoding="utf-8")
         self.assertIn("Bloc-notes", content)  # description par defaut de l'etape 2
 
+    def test_reexport_to_same_directory_removes_stale_images(self):
+        # Un premier export avec 2 etapes, puis un reexport (meme dossier)
+        # avec une seule etape : l'image de l'ancienne etape 2 ne doit pas
+        # trainer indefiniment dans le dossier images/.
+        out_dir = self.tmp / "export_reexport"
+        exp.export_markdown(self.steps, "Guide complet", out_dir)
+        self.assertTrue((out_dir / "images" / "etape-002.png").exists())
+
+        exp.export_markdown(self.steps[:1], "Guide raccourci", out_dir)
+        self.assertTrue((out_dir / "images" / "etape-001.png").exists())
+        self.assertFalse((out_dir / "images" / "etape-002.png").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
