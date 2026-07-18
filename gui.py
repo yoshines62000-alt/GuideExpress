@@ -210,14 +210,29 @@ class GuideExpressApp(tk.Tk):
 
         frame = ttk.Frame(self.hud, padding=12)
         frame.pack()
-        ttk.Label(frame, text="Enregistrement en cours", foreground="#c0392b", font=("Segoe UI", 10, "bold")).pack()
+        self.hud_status_var = tk.StringVar(value="Enregistrement en cours")
+        ttk.Label(frame, textvariable=self.hud_status_var, foreground="#c0392b", font=("Segoe UI", 10, "bold")).pack()
         self.hud_count_var = tk.StringVar(value="0 etape(s) capturee(s)")
         ttk.Label(frame, textvariable=self.hud_count_var).pack(pady=(4, 8))
+        self.hud_pause_button = ttk.Button(frame, text="Pause", command=self._toggle_pause_recording)
+        self.hud_pause_button.pack(pady=(0, 6))
         ttk.Button(frame, text="Arreter l'enregistrement", command=self._stop_recording).pack()
 
         self.hud.update_idletasks()
         screen_w = self.hud.winfo_screenwidth()
         self.hud.geometry(f"+{screen_w - 260}+20")
+
+    def _toggle_pause_recording(self):
+        if self.recorder is None:
+            return
+        if self.recorder.is_paused:
+            self.recorder.resume()
+            self.hud_status_var.set("Enregistrement en cours")
+            self.hud_pause_button.configure(text="Pause")
+        else:
+            self.recorder.pause()
+            self.hud_status_var.set("En pause")
+            self.hud_pause_button.configure(text="Reprendre")
 
     def _poll_events(self):
         if self.recorder is None:

@@ -123,6 +123,44 @@ class RecorderTestCase(RecorderTestBase):
         with self.assertRaises(RuntimeError):
             self.recorder.start()
 
+    def test_pause_ignores_clicks_without_losing_counter_progress(self):
+        self._left_click(1, 1)
+        self.recorder.wait_for_pending_saves()
+        self.recorder.pause()
+        self.assertTrue(self.recorder.is_paused)
+        self._left_click(2, 2)
+        self._left_click(3, 3)
+        self.recorder.wait_for_pending_saves()
+        self.assertEqual(self.recorder.events.qsize(), 1)  # les clics en pause sont ignores
+
+    def test_resume_lets_clicks_resume_from_the_same_counter(self):
+        self._left_click(1, 1)
+        self.recorder.wait_for_pending_saves()
+        self.recorder.pause()
+        self._left_click(2, 2)  # ignore pendant la pause
+        self.recorder.resume()
+        self.assertFalse(self.recorder.is_paused)
+        self._left_click(3, 3)
+        self.recorder.wait_for_pending_saves()
+        collected = []
+        while not self.recorder.events.empty():
+            collected.append(self.recorder.events.get())
+        # Le compteur n'est jamais decremente par un clic ignore en pause :
+        # la deuxieme etape reelle porte l'index 2, pas 3.
+        self.assertEqual([e["index"] for e in collected], [1, 2])
+
+    def test_pause_and_resume_are_no_ops_when_not_active(self):
+        self.recorder._active = False
+        self.recorder.pause()
+        self.assertFalse(self.recorder.is_paused)
+        self.recorder.resume()
+        self.assertFalse(self.recorder.is_paused)
+
+    def test_stop_clears_paused_state(self):
+        self.recorder.pause()
+        self.recorder.stop()
+        self.assertFalse(self.recorder.is_paused)
+
 
 class ErrorHandlingTestCase(RecorderTestBase):
     """Une erreur de capture ou d'ecriture ne doit jamais faire disparaitre

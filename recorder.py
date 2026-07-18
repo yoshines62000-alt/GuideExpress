@@ -57,6 +57,7 @@ class Recorder:
         self._save_queue: queue.Queue = queue.Queue()
         self._listener = None
         self._active = False
+        self._paused = False
         self._counter = 0
         self._shut_down = False
         # Fenetres (HWND) a ignorer : nos propres fenetres (ex: le bouton
@@ -70,17 +71,36 @@ class Recorder:
     def is_active(self) -> bool:
         return self._active
 
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
+
     def start(self) -> None:
         if self._shut_down:
             raise RuntimeError("Ce Recorder a deja ete arrete definitivement (shutdown) ; creez-en un nouveau.")
         if self._active:
             return
         self._active = True
+        self._paused = False
         self._listener = mouse.Listener(on_click=self._on_click)
         self._listener.start()
 
+    def pause(self) -> None:
+        """Suspend temporairement la capture des clics sans arreter
+        l'ecoute globale ni le thread d'ecriture : contrairement a stop(),
+        l'enregistrement peut reprendre ensuite avec resume() en gardant le
+        meme session_dir et le meme compteur d'etapes (aucune renumerotation,
+        aucune perte de la progression deja capturee)."""
+        if self._active:
+            self._paused = True
+
+    def resume(self) -> None:
+        if self._active:
+            self._paused = False
+
     def stop(self) -> None:
         self._active = False
+        self._paused = False
         if self._listener is not None:
             self._listener.stop()
             self._listener = None
@@ -120,7 +140,7 @@ class Recorder:
         # relachement, pour eviter un doublon par clic). Reste volontairement
         # tres court : la capture elle-meme (rapide) est faite ici, mais tout
         # le travail lent (encodage, ecriture disque) est delegue.
-        if not self._active or button != mouse.Button.left or not pressed:
+        if not self._active or self._paused or button != mouse.Button.left or not pressed:
             return
         try:
             if self.excluded_hwnds and get_window_at_point(x, y) in self.excluded_hwnds:
