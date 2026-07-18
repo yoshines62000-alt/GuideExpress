@@ -278,6 +278,12 @@ class GuideExpressApp(tk.Tk):
             self.hud.destroy()
             self.hud = None
         self.deiconify()
+        # shutdown() (pas juste stop()) : sans lui, le thread d'ecriture
+        # reste bloque indefiniment sur _save_queue.get() en attente du
+        # sentinelle que seul shutdown() envoie - un Recorder + thread
+        # seraient alors abandonnes, jamais liberes, a chaque enregistrement
+        # (bug trouve a l'audit : fuite de thread a chaque arret normal).
+        self.recorder.shutdown()
         self.recorder = None
         self._build_review_view()
 
@@ -418,16 +424,20 @@ class GuideExpressApp(tk.Tk):
         # Recorder recommence sa propre numerotation a 1 a chaque reprise, ce
         # qui ecraserait silencieusement la reprise d'une AUTRE etape si
         # toutes les reprises partageaient le meme dossier "retakes" (bug
-        # trouve a l'audit). On cle donc ce sous-dossier sur le nom de
-        # fichier original de l'etape (unique dans la session, puisque
-        # attribue une seule fois par ordre croissant a l'enregistrement) -
-        # si l'etape a deja ete reprise au moins une fois, son
-        # raw_image_path pointe deja vers ce meme sous-dossier dedie, qu'on
-        # reutilise alors tel quel plutot que d'en imbriquer un nouveau.
+        # trouve a l'audit). On cle ce sous-dossier sur `step.uid`, PAS sur
+        # le nom du fichier image brut : deux etapes distinctes peuvent
+        # partager le meme raw_image_path (voir duplicate_step) sans jamais
+        # partager le meme uid, donc reprendre l'une n'ecrase jamais le
+        # dossier de reprise de l'autre (second bug trouve a l'audit : cle
+        # sur le nom de fichier, la duplication d'etape faisait collisionner
+        # les deux reprises). Si l'etape a deja ete reprise au moins une
+        # fois, son raw_image_path pointe deja vers ce meme sous-dossier
+        # dedie, qu'on reutilise alors tel quel plutot que d'en imbriquer un
+        # nouveau.
         if "retakes" in step.raw_image_path.parts:
             retake_dir = step.raw_image_path.parent
         else:
-            retake_dir = self.session_dir / "retakes" / step.raw_image_path.stem
+            retake_dir = self.session_dir / "retakes" / step.uid
         self._retake_recorder = Recorder(retake_dir, excluded_hwnds=excluded)
         self._retake_recorder.start()
         self.after(150, self._poll_retake)

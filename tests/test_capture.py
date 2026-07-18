@@ -223,6 +223,22 @@ class ReorderingTestCase(unittest.TestCase):
         cap.duplicate_step(steps, 99)
         self.assertEqual(len(steps), 2)
 
+    def test_duplicate_step_assigns_a_distinct_uid_to_the_copy(self):
+        # Un uid distinct est ce qui permet a gui.py._retake_step d'isoler
+        # le dossier de reprise de chaque etape : sans lui, reprendre l'une
+        # des deux etapes ecraserait le fichier de reprise de l'autre (bug
+        # trouve a l'audit, les deux etapes calculant le meme dossier de
+        # reprise a partir du nom de fichier brut partage).
+        steps = self._steps(2)
+        original_uid = steps[0].uid
+        cap.duplicate_step(steps, 0)
+        self.assertNotEqual(steps[1].uid, original_uid)
+
+    def test_each_captured_step_gets_a_distinct_uid_by_default(self):
+        steps = self._steps(3)
+        uids = {s.uid for s in steps}
+        self.assertEqual(len(uids), 3)
+
 
 class EscapingTestCase(unittest.TestCase):
     def test_markdown_escape_neutralizes_special_characters(self):

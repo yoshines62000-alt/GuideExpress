@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ctypes
 import re
+import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
@@ -69,6 +70,13 @@ class Step:
     # pour un clic sur un petit element (icone, case a cocher) difficile a
     # repérer sur une capture plein ecran.
     zoom: bool = False
+    # Identifiant stable et unique par ETAPE (pas par fichier image) - utilise
+    # par gui.py pour isoler le dossier de reprise de chaque etape. Distinct
+    # de raw_image_path : deux etapes (original + copie de duplicate_step)
+    # peuvent partager le meme fichier image brut sans jamais partager le
+    # meme uid, ce qui evite que la reprise de l'une n'ecrase le fichier
+    # utilise par l'autre (bug trouve a l'audit).
+    uid: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def default_description(self) -> str:
         app = self.window_title.strip() or "une fenetre non identifiee"
@@ -207,15 +215,18 @@ def duplicate_step(steps: list, index: int) -> list:
     sans reprendre une capture d'ecran (ex: "cliquez ici" puis, sur la meme
     image, "verifiez que ceci apparait"). La copie partage volontairement le
     meme fichier image brut que l'original (jamais modifie sur disque, voir
-    render_step_image) : aucune copie de fichier n'est necessaire, et une
-    reprise ulterieure sur l'une des deux etapes (voir _retake_step dans
-    gui.py) n'affecte que son propre `raw_image_path`, jamais celui de
-    l'autre. Les redactions sont copiees (liste independante) pour qu'editer
-    l'une des deux etapes ne modifie jamais l'autre."""
+    render_step_image) : aucune copie de fichier n'est necessaire. Un nouvel
+    `uid` est genere pour la copie (jamais copie depuis l'original) : c'est
+    ce qui permet a `_retake_step` (gui.py) d'isoler le dossier de reprise de
+    chaque etape - sans uid distinct, reprendre l'une des deux etapes avant
+    l'autre ecraserait le fichier de reprise de l'autre (bug trouve a
+    l'audit : les deux calculaient le meme dossier de reprise a partir du nom
+    de fichier partage). Les redactions sont copiees (liste independante)
+    pour qu'editer l'une des deux etapes ne modifie jamais l'autre."""
     if not (0 <= index < len(steps)):
         return steps
     original = steps[index]
-    duplicate = replace(original, redactions=list(original.redactions))
+    duplicate = replace(original, redactions=list(original.redactions), uid=uuid.uuid4().hex)
     steps.insert(index + 1, duplicate)
     renumber(steps)
     return steps
