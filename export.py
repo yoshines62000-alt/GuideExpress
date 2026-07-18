@@ -64,7 +64,7 @@ def export_markdown(steps: list, title: str, output_dir: Path) -> Path:
     for stale in images_dir.glob("etape-*.png"):
         stale.unlink(missing_ok=True)
 
-    lines = [f"# {title}", "", f"{len(steps)} etape(s).", ""]
+    lines = [f"# {escape_markdown(title)}", "", f"{len(steps)} etape(s).", ""]
     for step in steps:
         image_name = f"etape-{step.index:03d}.png"
         (images_dir / image_name).write_bytes(_step_to_png_bytes(step))

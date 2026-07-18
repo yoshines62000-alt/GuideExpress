@@ -94,9 +94,14 @@ python -m pip install -r requirements.txt
   de télémétrie.
 - Aucune frappe clavier n'est jamais interceptée, seulement la position des
   clics de souris au moment où ils se produisent.
-- Les captures d'écran brutes restent sur le disque le temps de la session
+- Les captures d'écran brutes restent sur le disque
   (`~/.guide_express/sessions/`) ; rien n'est exporté sans relecture explicite.
-- La rédaction de zones sensibles utilise un rectangle opaque, pas un flou.
+- La rédaction de zones sensibles utilise un rectangle opaque, pas un flou —
+  mais elle ne s'applique qu'à l'export : la capture brute (non rédigée) reste
+  dans `~/.guide_express/sessions/`. **GuideExpress ne supprime jamais
+  automatiquement ces sessions** : si vous partagez votre ordinateur, pensez
+  à vider ce dossier manuellement après avoir exporté un guide contenant des
+  informations sensibles.
 
 ## Créer un exécutable autonome (.exe)
 

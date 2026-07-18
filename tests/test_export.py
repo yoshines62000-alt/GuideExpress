@@ -82,6 +82,17 @@ class ExportTestCase(unittest.TestCase):
         self.assertNotIn("*Fichier*", content)
         self.assertIn("\\*Fichier\\*", content)
 
+    def test_export_markdown_escapes_title(self):
+        # Le titre est saisi librement par l'utilisateur (Entry Tkinter),
+        # tout comme les descriptions d'etape : il doit etre echappe de la
+        # meme facon, pas seulement les descriptions.
+        out_dir = self.tmp / "export_md3"
+        md_path = exp.export_markdown(self.steps, "Guide *important* [confidentiel]", out_dir)
+        content = md_path.read_text(encoding="utf-8")
+        self.assertNotIn("# Guide *important* [confidentiel]", content)
+        self.assertIn("\\*important\\*", content)
+        self.assertIn("\\[confidentiel\\]", content)
+
     def test_export_uses_default_description_when_empty(self):
         out = self.tmp / "guide.html"
         exp.export_html(self.steps, "Titre", out)
