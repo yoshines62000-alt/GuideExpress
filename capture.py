@@ -27,6 +27,7 @@ from typing import Optional
 from PIL import Image, ImageDraw
 
 CLICK_MARKER_COLOR = (230, 30, 30)
+RIGHT_CLICK_MARKER_COLOR = (30, 90, 230)
 CLICK_MARKER_RADIUS = 22
 CLICK_MARKER_WIDTH = 4
 REDACTION_COLOR = (20, 20, 20)
@@ -77,9 +78,15 @@ class Step:
     # meme uid, ce qui evite que la reprise de l'une n'ecrase le fichier
     # utilise par l'autre (bug trouve a l'audit).
     uid: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # "left" ou "right" - beaucoup de procedures reelles passent par un menu
+    # contextuel (clic droit > Renommer, > Coller...), invisible jusqu'ici
+    # puisque seul le clic gauche etait ecoute.
+    button: str = "left"
 
     def default_description(self) -> str:
         app = self.window_title.strip() or "une fenetre non identifiee"
+        if self.button == "right":
+            return f"Cliquez droit dans {app}."
         return f"Cliquez dans {app}."
 
     def display_description(self) -> str:
@@ -142,9 +149,10 @@ def render_step_image(step: Step, zoom: bool = False) -> Image.Image:
 
     r = CLICK_MARKER_RADIUS
     cx, cy = step.click_x, step.click_y
+    marker_color = RIGHT_CLICK_MARKER_COLOR if step.button == "right" else CLICK_MARKER_COLOR
     draw.ellipse(
         [cx - r, cy - r, cx + r, cy + r],
-        outline=CLICK_MARKER_COLOR,
+        outline=marker_color,
         width=CLICK_MARKER_WIDTH,
     )
 
@@ -230,6 +238,61 @@ def duplicate_step(steps: list, index: int) -> list:
     steps.insert(index + 1, duplicate)
     renumber(steps)
     return steps
+
+
+# ---------------------------------------------------------------------------
+# Sauvegarde/reouverture d'une session (session.json)
+# ---------------------------------------------------------------------------
+# Fonctions pures, sans effet de bord disque (gui.py se charge de
+# lire/ecrire le fichier session.json lui-meme) : facilite les tests et
+# separe la logique de serialisation de son declenchement dans l'UI.
+
+def step_to_dict(step: Step, session_dir: Path) -> dict:
+    """Serialise une etape en dict JSON-compatible. raw_image_path est
+    stocke RELATIF a session_dir (jamais en absolu) pour que le dossier de
+    session reste deplacable/copiable sans casser session.json."""
+    try:
+        raw_relative = str(step.raw_image_path.relative_to(session_dir))
+    except ValueError:
+        # Ne devrait jamais arriver (toutes les images d'une session vivent
+        # sous session_dir, y compris les reprises dans retakes/<uid>) - un
+        # chemin absolu de secours vaut mieux qu'une exception qui ferait
+        # echouer toute la sauvegarde de session pour une seule etape.
+        raw_relative = str(step.raw_image_path)
+    return {
+        "index": step.index,
+        "raw_image_path": raw_relative,
+        "click_x": step.click_x,
+        "click_y": step.click_y,
+        "button": step.button,
+        "window_title": step.window_title,
+        "timestamp": step.timestamp,
+        "description": step.description,
+        "redactions": [list(r) for r in step.redactions],
+        "zoom": step.zoom,
+        "uid": step.uid,
+    }
+
+
+def step_from_dict(data: dict, session_dir: Path) -> Step:
+    """Reconstruit une etape depuis un dict deja charge (session.json). Les
+    cles inconnues sont ignorees et les cles absentes retombent sur une
+    valeur par defaut raisonnable, pour tolerer un schema legerement
+    different d'une version future/passee de GuideExpress plutot que de
+    faire echouer toute la reouverture d'une session pour un champ manquant."""
+    return Step(
+        index=data.get("index", 0),
+        raw_image_path=session_dir / data.get("raw_image_path", ""),
+        click_x=data.get("click_x", 0),
+        click_y=data.get("click_y", 0),
+        button=data.get("button", "left"),
+        window_title=data.get("window_title", ""),
+        timestamp=data.get("timestamp", ""),
+        description=data.get("description", ""),
+        redactions=[tuple(r) for r in data.get("redactions", [])],
+        zoom=bool(data.get("zoom", False)),
+        uid=data.get("uid") or uuid.uuid4().hex,
+    )
 
 
 # ---------------------------------------------------------------------------

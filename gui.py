@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -14,12 +15,16 @@ from PIL import ImageTk
 
 DONATE_URL = "https://ko-fi.com/yoshines62000"
 
-from capture import Step, render_step_image, move_step, move_step_to, delete_step, duplicate_step, sanitize_filename, get_window_at_point
+from capture import (
+    Step, render_step_image, move_step, move_step_to, delete_step, duplicate_step,
+    sanitize_filename, get_window_at_point, step_to_dict, step_from_dict, renumber,
+)
 from recorder import Recorder
 from export import export_html, export_markdown, export_pdf
 
 APP_DIR = Path.home() / ".guide_express"
 SESSIONS_DIR = APP_DIR / "sessions"
+SESSION_META_FILENAME = "session.json"
 
 THUMBNAIL_MAX_SIZE = (220, 150)
 EDITOR_MAX_SIZE = (980, 680)
@@ -152,10 +157,77 @@ class GuideExpressApp(tk.Tk):
         actions = ttk.Frame(frame)
         actions.pack(fill="x", pady=(10, 0))
         ttk.Button(
+            actions, text="Rouvrir la session selectionnee",
+            command=lambda: self._reopen_session(tree),
+        ).pack(side="left")
+        ttk.Button(
             actions, text="Supprimer la session selectionnee",
             command=lambda: self._delete_session(tree),
-        ).pack(side="left")
+        ).pack(side="left", padx=(6, 0))
         ttk.Button(actions, text="Retour", command=self._build_start_view).pack(side="right")
+
+    def _save_session_meta(self) -> None:
+        """Ecrit session_dir/session.json (titre + etapes), pour pouvoir
+        rouvrir la session plus tard - sans ca, fermer l'application apres
+        un enregistrement perdait tout le travail de relecture (descriptions,
+        redactions, ordre, zoom), seules les captures brutes survivant sur
+        le disque, inutilisables telles quelles."""
+        if self.session_dir is None:
+            return
+        meta = {
+            "title": self.title_var.get(),
+            "steps": [step_to_dict(step, self.session_dir) for step in self.steps],
+        }
+        try:
+            self.session_dir.mkdir(parents=True, exist_ok=True)
+            (self.session_dir / SESSION_META_FILENAME).write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8",
+            )
+        except OSError:
+            pass  # une sauvegarde de metadonnees ratee ne doit jamais interrompre l'edition en cours
+
+    def _reopen_session(self, tree):
+        selection = tree.selection()
+        if not selection:
+            messagebox.showinfo("Rouvrir une session", "Selectionnez une session d'abord.")
+            return
+        session_path = Path(selection[0])
+        meta_path = session_path / SESSION_META_FILENAME
+        if not meta_path.exists():
+            messagebox.showinfo(
+                "Rouvrir une session",
+                "Cette session n'a pas de fichier de metadonnees (enregistree avant "
+                "cette fonctionnalite, ou clic droit sur 'Retour' sans jamais avoir "
+                "atteint la relecture) : seules les captures brutes existent, elle "
+                "ne peut pas etre rouverte automatiquement.",
+            )
+            return
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            messagebox.showerror("Rouvrir une session", f"Fichier de session illisible ou corrompu :\n{exc}")
+            return
+
+        steps = []
+        missing = 0
+        for data in meta.get("steps", []):
+            step = step_from_dict(data, session_path)
+            if not step.raw_image_path.exists():
+                missing += 1
+                continue
+            steps.append(step)
+
+        if missing:
+            renumber(steps)  # des etapes manquantes ont ete ecartees : combler les trous de numerotation
+        self.session_dir = session_path
+        self.title_var.set(meta.get("title", "Mon guide"))
+        self.steps = steps
+        self._build_review_view()
+        if missing:
+            messagebox.showwarning(
+                "Rouvrir une session",
+                f"{missing} etape(s) ignoree(s) : leur image brute est introuvable sur le disque.",
+            )
 
     def _delete_session(self, tree):
         selection = tree.selection()
@@ -214,6 +286,9 @@ class GuideExpressApp(tk.Tk):
         ttk.Label(frame, textvariable=self.hud_status_var, foreground="#c0392b", font=("Segoe UI", 10, "bold")).pack()
         self.hud_count_var = tk.StringVar(value="0 etape(s) capturee(s)")
         ttk.Label(frame, textvariable=self.hud_count_var).pack(pady=(4, 8))
+        ttk.Label(
+            frame, text="Clic gauche ou droit = une etape", foreground="#666", font=("Segoe UI", 8),
+        ).pack(pady=(0, 6))
         self.hud_pause_button = ttk.Button(frame, text="Pause", command=self._toggle_pause_recording)
         self.hud_pause_button.pack(pady=(0, 6))
         ttk.Button(frame, text="Arreter l'enregistrement", command=self._stop_recording).pack()
@@ -305,6 +380,12 @@ class GuideExpressApp(tk.Tk):
     # ------------------------------------------------------------------
 
     def _build_review_view(self):
+        # Appele apres CHAQUE mutation de self.steps (arret d'enregistrement,
+        # reprise, deplacement, suppression, duplication, zoom, redaction) :
+        # un seul point d'appel suffit donc a garder session.json a jour en
+        # permanence, sans avoir a l'ajouter individuellement a chaque
+        # gestionnaire d'evenement.
+        self._save_session_meta()
         self._clear_container()
         self._thumbnail_refs = []
 
@@ -495,6 +576,7 @@ class GuideExpressApp(tk.Tk):
         step.raw_image_path = data["raw_image_path"]
         step.click_x = data["click_x"]
         step.click_y = data["click_y"]
+        step.button = data["button"]
         step.window_title = data["window_title"]
         step.timestamp = data["timestamp"]
         # Les rectangles de redaction sont en coordonnees absolues de

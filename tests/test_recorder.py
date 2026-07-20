@@ -54,11 +54,29 @@ class RecorderTestCase(RecorderTestBase):
         self.recorder._on_click(x, y, mouse.Button.left, True)
         self.recorder._on_click(x, y, mouse.Button.left, False)  # relachement, ignore
 
-    def test_only_left_button_press_creates_a_step(self):
-        self.recorder._on_click(10, 10, mouse.Button.right, True)
+    def test_release_does_not_create_a_step(self):
         self.recorder._on_click(10, 10, mouse.Button.left, False)
+        self.recorder._on_click(10, 10, mouse.Button.right, False)
         self.recorder.wait_for_pending_saves()
         self.assertEqual(self.recorder.events.qsize(), 0)
+
+    def test_middle_button_is_ignored(self):
+        self.recorder._on_click(10, 10, mouse.Button.middle, True)
+        self.recorder.wait_for_pending_saves()
+        self.assertEqual(self.recorder.events.qsize(), 0)
+
+    def test_left_button_press_creates_a_step_tagged_left(self):
+        self._left_click(5, 5)
+        self.recorder.wait_for_pending_saves()
+        event = self.recorder.events.get()
+        self.assertEqual(event["button"], "left")
+
+    def test_right_button_press_creates_a_step_tagged_right(self):
+        self.recorder._on_click(10, 10, mouse.Button.right, True)
+        self.recorder.wait_for_pending_saves()
+        self.assertEqual(self.recorder.events.qsize(), 1)
+        event = self.recorder.events.get()
+        self.assertEqual(event["button"], "right")
 
     def test_rapid_clicks_are_all_saved_without_loss(self):
         for i in range(15):

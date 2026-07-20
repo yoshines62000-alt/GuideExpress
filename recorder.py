@@ -140,7 +140,7 @@ class Recorder:
         # relachement, pour eviter un doublon par clic). Reste volontairement
         # tres court : la capture elle-meme (rapide) est faite ici, mais tout
         # le travail lent (encodage, ecriture disque) est delegue.
-        if not self._active or self._paused or button != mouse.Button.left or not pressed:
+        if not self._active or self._paused or button not in (mouse.Button.left, mouse.Button.right) or not pressed:
             return
         try:
             if self.excluded_hwnds and get_window_at_point(x, y) in self.excluded_hwnds:
@@ -162,6 +162,7 @@ class Recorder:
             "image": screenshot,
             "click_x": x,
             "click_y": y,
+            "button": "left" if button == mouse.Button.left else "right",
             "window_title": get_window_title_at_point(x, y),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         })
@@ -181,6 +182,7 @@ class Recorder:
                     "raw_image_path": raw_path,
                     "click_x": item["click_x"],
                     "click_y": item["click_y"],
+                    "button": item["button"],
                     "window_title": item["window_title"],
                     "timestamp": item["timestamp"],
                 })

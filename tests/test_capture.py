@@ -60,6 +60,22 @@ class RenderStepImageTestCase(unittest.TestCase):
         pixel_at_center = img.getpixel((200, 150))
         self.assertNotEqual(pixel_at_center, cap.CLICK_MARKER_COLOR)
 
+    def test_right_click_marker_uses_a_distinct_color(self):
+        step = self._step(click_x=200, click_y=150, button="right")
+        img = cap.render_step_image(step)
+        r = cap.CLICK_MARKER_RADIUS
+        pixel_on_ring = img.getpixel((200 + r, 150))
+        self.assertEqual(pixel_on_ring, cap.RIGHT_CLICK_MARKER_COLOR)
+        self.assertNotEqual(cap.RIGHT_CLICK_MARKER_COLOR, cap.CLICK_MARKER_COLOR)
+
+    def test_left_click_default_description_mentions_left_click_only(self):
+        step = self._step(window_title="Bloc-notes")
+        self.assertEqual(step.default_description(), "Cliquez dans Bloc-notes.")
+
+    def test_right_click_default_description_mentions_right_click(self):
+        step = self._step(window_title="Bloc-notes", button="right")
+        self.assertEqual(step.default_description(), "Cliquez droit dans Bloc-notes.")
+
     def test_redaction_produces_solid_opaque_block(self):
         step = self._step(redactions=[(50, 50, 150, 120)])
         img = cap.render_step_image(step)
@@ -238,6 +254,79 @@ class ReorderingTestCase(unittest.TestCase):
         steps = self._steps(3)
         uids = {s.uid for s in steps}
         self.assertEqual(len(uids), 3)
+
+
+class SessionSerializationTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.session_dir = self.tmp / "session"
+        self.session_dir.mkdir()
+
+    def _step(self, **overrides):
+        raw_path = self.session_dir / "step_0001_raw.png"
+        raw_path.write_bytes(b"fake-png")
+        defaults = dict(
+            index=1, raw_image_path=raw_path, click_x=10, click_y=20,
+            window_title="Bloc-notes", timestamp="2026-01-01 10:00:00",
+            description="Cliquez ici", redactions=[(1, 2, 3, 4)], zoom=True,
+        )
+        defaults.update(overrides)
+        return cap.Step(**defaults)
+
+    def test_round_trip_preserves_all_fields(self):
+        step = self._step(button="right")
+        data = cap.step_to_dict(step, self.session_dir)
+        restored = cap.step_from_dict(data, self.session_dir)
+        self.assertEqual(restored.index, step.index)
+        self.assertEqual(restored.raw_image_path, step.raw_image_path)
+        self.assertEqual(restored.click_x, step.click_x)
+        self.assertEqual(restored.click_y, step.click_y)
+        self.assertEqual(restored.button, "right")
+        self.assertEqual(restored.window_title, step.window_title)
+        self.assertEqual(restored.description, step.description)
+        self.assertEqual(restored.redactions, step.redactions)
+        self.assertEqual(restored.zoom, step.zoom)
+        self.assertEqual(restored.uid, step.uid)
+
+    def test_raw_image_path_is_stored_relative_to_session_dir(self):
+        step = self._step()
+        data = cap.step_to_dict(step, self.session_dir)
+        self.assertEqual(data["raw_image_path"], "step_0001_raw.png")
+        self.assertNotIn(str(self.session_dir), data["raw_image_path"])
+
+    def test_relative_path_resolves_correctly_under_a_retake_subfolder(self):
+        retake_dir = self.session_dir / "retakes" / "abc123"
+        retake_dir.mkdir(parents=True)
+        raw_path = retake_dir / "step_0001_raw.png"
+        raw_path.write_bytes(b"fake-png")
+        step = self._step(raw_image_path=raw_path, uid="abc123")
+        data = cap.step_to_dict(step, self.session_dir)
+        self.assertEqual(data["raw_image_path"], str(Path("retakes") / "abc123" / "step_0001_raw.png"))
+        restored = cap.step_from_dict(data, self.session_dir)
+        self.assertEqual(restored.raw_image_path, raw_path)
+
+    def test_from_dict_tolerates_unknown_keys(self):
+        data = cap.step_to_dict(self._step(), self.session_dir)
+        data["un_champ_du_futur"] = "peu importe"
+        restored = cap.step_from_dict(data, self.session_dir)  # ne doit pas lever
+        self.assertEqual(restored.index, 1)
+
+    def test_from_dict_tolerates_missing_optional_keys(self):
+        minimal = {"raw_image_path": "step_0001_raw.png"}
+        restored = cap.step_from_dict(minimal, self.session_dir)
+        self.assertEqual(restored.description, "")
+        self.assertEqual(restored.redactions, [])
+        self.assertFalse(restored.zoom)
+        self.assertEqual(restored.button, "left")
+        self.assertTrue(restored.uid)  # un uid est genere si absent
+
+    def test_redactions_round_trip_as_tuples(self):
+        step = self._step(redactions=[(1, 2, 3, 4), (5, 6, 7, 8)])
+        data = cap.step_to_dict(step, self.session_dir)
+        restored = cap.step_from_dict(data, self.session_dir)
+        self.assertEqual(restored.redactions, [(1, 2, 3, 4), (5, 6, 7, 8)])
+        for r in restored.redactions:
+            self.assertIsInstance(r, tuple)
 
 
 class EscapingTestCase(unittest.TestCase):
