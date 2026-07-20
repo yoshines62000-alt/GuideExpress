@@ -212,7 +212,15 @@ class GuideExpressApp(tk.Tk):
         missing = 0
         for data in meta.get("steps", []):
             step = step_from_dict(data, session_path)
-            if not step.raw_image_path.exists():
+            # is_file(), pas exists() : une entree sans raw_image_path (ou
+            # vide) fait retomber step_from_dict sur session_path / "" ==
+            # session_path lui-meme, qui EXISTE toujours (c'est un dossier)
+            # - exists() ne detectait donc jamais ce cas et laissait passer
+            # une etape pointant vers un dossier, plantant plus tard dans
+            # render_step_image (Image.open() sur un dossier) au lieu
+            # d'etre proprement comptee dans l'avertissement "etapes
+            # ignorees" ci-dessous (bug trouve a l'audit).
+            if not step.raw_image_path.is_file():
                 missing += 1
                 continue
             steps.append(step)
@@ -392,7 +400,16 @@ class GuideExpressApp(tk.Tk):
         top = ttk.Frame(self._container, padding=(10, 10, 10, 0))
         top.pack(fill="x")
         ttk.Label(top, text="Titre :").pack(side="left")
-        ttk.Entry(top, textvariable=self.title_var, width=40).pack(side="left", padx=6)
+        title_entry = ttk.Entry(top, textvariable=self.title_var, width=40)
+        title_entry.pack(side="left", padx=6)
+        # Sans ce binding, editer le titre puis fermer l'app sans aucune
+        # AUTRE mutation (deplacer/supprimer/dupliquer/zoomer/reprendre une
+        # etape) ne sauvegardait jamais le nouveau titre dans session.json -
+        # _save_session_meta() n'etait alors appele qu'au debut de
+        # _build_review_view(), jamais quand seul un champ de saisie change
+        # (bug trouve a l'audit).
+        title_entry.bind("<FocusOut>", lambda e: self._save_session_meta())
+        title_entry.bind("<Return>", lambda e: self._save_session_meta())
         ttk.Label(top, text=f"{len(self.steps)} etape(s)").pack(side="left", padx=12)
 
         list_frame = ttk.Frame(self._container)
@@ -447,8 +464,19 @@ class GuideExpressApp(tk.Tk):
         desc_var = tk.StringVar(value=step.description)
         entry = ttk.Entry(mid, textvariable=desc_var, width=50)
         entry.pack(anchor="w", fill="x", pady=(2, 0))
-        entry.bind("<FocusOut>", lambda e, s=step, v=desc_var: setattr(s, "description", v.get()))
-        entry.bind("<Return>", lambda e, s=step, v=desc_var: setattr(s, "description", v.get()))
+        # Meme bug que pour le titre (voir _build_review_view) : sans
+        # l'appel a _save_session_meta() ici, une description editee puis
+        # jamais suivie d'une AUTRE mutation de self.steps n'etait jamais
+        # ecrite dans session.json. On appelle _save_session_meta()
+        # directement (pas _build_review_view()) pour ne pas reconstruire
+        # toute la vue - et donc perdre le focus/défilement - a chaque
+        # simple edition de texte.
+        def _on_description_committed(event, s=step, v=desc_var):
+            s.description = v.get()
+            self._save_session_meta()
+
+        entry.bind("<FocusOut>", _on_description_committed)
+        entry.bind("<Return>", _on_description_committed)
         zoom_var = tk.BooleanVar(value=step.zoom)
         zoom_check = ttk.Checkbutton(
             mid, text="Zoomer sur la zone du clic", variable=zoom_var,
@@ -505,20 +533,20 @@ class GuideExpressApp(tk.Tk):
         # Recorder recommence sa propre numerotation a 1 a chaque reprise, ce
         # qui ecraserait silencieusement la reprise d'une AUTRE etape si
         # toutes les reprises partageaient le meme dossier "retakes" (bug
-        # trouve a l'audit). On cle ce sous-dossier sur `step.uid`, PAS sur
-        # le nom du fichier image brut : deux etapes distinctes peuvent
-        # partager le meme raw_image_path (voir duplicate_step) sans jamais
-        # partager le meme uid, donc reprendre l'une n'ecrase jamais le
-        # dossier de reprise de l'autre (second bug trouve a l'audit : cle
-        # sur le nom de fichier, la duplication d'etape faisait collisionner
-        # les deux reprises). Si l'etape a deja ete reprise au moins une
-        # fois, son raw_image_path pointe deja vers ce meme sous-dossier
-        # dedie, qu'on reutilise alors tel quel plutot que d'en imbriquer un
-        # nouveau.
-        if "retakes" in step.raw_image_path.parts:
-            retake_dir = step.raw_image_path.parent
-        else:
-            retake_dir = self.session_dir / "retakes" / step.uid
+        # trouve a l'audit). Toujours recalcule a partir de `step.uid` SEUL
+        # (jamais a partir de raw_image_path.parent) : une precedente
+        # version reutilisait le dossier parent de raw_image_path des que
+        # "retakes" y apparaissait, mais duplicate_step donne une copie qui
+        # partage le raw_image_path de l'original (potentiellement deja
+        # sous retakes/<uid_original>/) tout en ayant son PROPRE uid neuf -
+        # reprendre cette copie recalculait alors le dossier de l'ORIGINAL
+        # au lieu du sien, ecrasant silencieusement la reprise de
+        # l'original (second bug trouve a l'audit, reintroduit par la
+        # duplication d'etape). Cette version, purement fonction de
+        # step.uid, retombe naturellement sur le meme dossier qu'une
+        # reprise precedente de la MEME etape (meme uid), et sur un dossier
+        # distinct pour toute autre etape, dupliquee ou non.
+        retake_dir = self.session_dir / "retakes" / step.uid
         self._retake_recorder = Recorder(retake_dir, excluded_hwnds=excluded)
         self._retake_recorder.start()
         self.after(150, self._poll_retake)
