@@ -12,9 +12,30 @@ from PIL import Image, ImageDraw
 
 from capture import render_step_image, html_escape, escape_markdown
 
+# Largeur max (px) des images inserees dans un export, quel que soit le
+# format. `ImageGrab.grab(all_screens=True)` (voir recorder.py) capture tout
+# le bureau virtuel : sur une configuration 4K/multi-ecrans, un guide de
+# plusieurs dizaines d'etapes en pleine resolution peut produire un fichier
+# de plusieurs centaines de Mo. Initialement applique uniquement a l'export
+# PDF (via redimensionnement explicite dans _step_to_pdf_page), cette limite
+# vaut maintenant aussi pour HTML et Markdown (voir _step_to_png_bytes), qui
+# encodaient auparavant les captures en pleine resolution sans aucune limite
+# (bug trouve a l'audit).
+_EXPORT_IMAGE_MAX_WIDTH = 1400
+
+
+def _resize_for_export(img: Image.Image) -> Image.Image:
+    """Redimensionne une image si elle depasse _EXPORT_IMAGE_MAX_WIDTH, en
+    conservant le ratio hauteur/largeur. Partage par les 3 formats d'export
+    (HTML, Markdown, PDF)."""
+    if img.width > _EXPORT_IMAGE_MAX_WIDTH:
+        ratio = _EXPORT_IMAGE_MAX_WIDTH / img.width
+        return img.resize((_EXPORT_IMAGE_MAX_WIDTH, max(1, int(img.height * ratio))))
+    return img
+
 
 def _step_to_png_bytes(step, zoom: bool = False) -> bytes:
-    img = render_step_image(step, zoom=zoom)
+    img = _resize_for_export(render_step_image(step, zoom=zoom))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
@@ -84,7 +105,6 @@ def export_markdown(steps: list, title: str, output_dir: Path) -> Path:
     return md_path
 
 
-_PDF_PAGE_MAX_WIDTH = 1400
 _PDF_TEXT_AREA_HEIGHT = 140
 
 
@@ -99,10 +119,7 @@ def _latin1_safe(text: str) -> str:
 def _step_to_pdf_page(step, title_prefix: str) -> Image.Image:
     """Compose une page image : capture de l'etape en haut, titre et
     description en dessous sur fond blanc (pret a etre assemble en PDF)."""
-    screenshot = render_step_image(step, zoom=step.zoom).convert("RGB")
-    if screenshot.width > _PDF_PAGE_MAX_WIDTH:
-        ratio = _PDF_PAGE_MAX_WIDTH / screenshot.width
-        screenshot = screenshot.resize((_PDF_PAGE_MAX_WIDTH, max(1, int(screenshot.height * ratio))))
+    screenshot = _resize_for_export(render_step_image(step, zoom=step.zoom).convert("RGB"))
 
     page = Image.new("RGB", (screenshot.width, screenshot.height + _PDF_TEXT_AREA_HEIGHT), color="white")
     page.paste(screenshot, (0, 0))

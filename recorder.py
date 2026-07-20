@@ -41,13 +41,21 @@ class Recorder:
     (capture ou ecriture echouee) sont deposees dans `capture_errors`, a
     afficher a l'utilisateur plutot qu'a laisser disparaitre silencieusement.
 
-    Important : le callback appele par pynput s'execute dans le hook systeme
-    bas-niveau de la souris. Windows impose un delai maximum de reponse a ce
-    genre de callback ; y faire de l'encodage PNG et de l'ecriture disque
-    directement risquerait de perdre des clics (voire de faire desactiver le
-    hook par l'OS sur une machine lente). Le callback se contente donc de
-    saisir la capture en memoire et de la deleguer immediatement a un thread
-    d'ecriture separe."""
+    Important : le callback appele par pynput (_on_click) s'execute dans le
+    hook systeme bas-niveau de la souris. Windows impose un delai maximum de
+    reponse a ce genre de callback ; y faire de l'encodage PNG et de
+    l'ecriture disque directement risquerait de perdre des clics (voire de
+    faire desactiver le hook par l'OS sur une machine lente). Seuls ces deux
+    travaux lents (encodage PNG, ecriture disque) sont donc deportes vers le
+    thread d'ecriture separe (_writer_loop), via _save_queue.
+
+    La capture d'ecran elle-meme (ImageGrab.grab, voir _grab_screenshot)
+    reste en revanche appelee de facon SYNCHRONE, directement dans le
+    callback, avant toute delegation : c'est volontaire, pas un oubli - le
+    moment exact de la capture doit rester solidaire de celui du clic. La
+    deporter vers le thread d'ecriture changerait ce qui est effectivement
+    capture (l'ecran au moment ou le thread traite la file, potentiellement
+    plus tard si elle a du retard, plutot qu'au moment reel du clic)."""
 
     def __init__(self, session_dir: Path, excluded_hwnds: frozenset = frozenset()):
         self.session_dir = session_dir

@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
+import shutil
 import sys
 import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 
 from PIL import ImageTk
 
@@ -135,7 +137,8 @@ class GuideExpressApp(tk.Tk):
             frame,
             text=(
                 f"Captures brutes stockees dans {SESSIONS_DIR} - GuideExpress ne les supprime\n"
-                "jamais automatiquement. Supprimez ici celles qui ne sont plus necessaires."
+                "jamais automatiquement. Supprimez ici celles qui ne sont plus necessaires (Ctrl/Shift-clic\n"
+                "pour en selectionner plusieurs a la fois, ou purgez les sessions les plus anciennes d'un coup)."
             ),
             foreground="#666", justify="left",
         ).pack(anchor="w", pady=(4, 12))
@@ -161,8 +164,12 @@ class GuideExpressApp(tk.Tk):
             command=lambda: self._reopen_session(tree),
         ).pack(side="left")
         ttk.Button(
-            actions, text="Supprimer la session selectionnee",
+            actions, text="Supprimer la selection",
             command=lambda: self._delete_session(tree),
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(
+            actions, text="Supprimer les sessions de plus de N jours...",
+            command=self._delete_old_sessions,
         ).pack(side="left", padx=(6, 0))
         ttk.Button(actions, text="Retour", command=self._build_start_view).pack(side="right")
 
@@ -237,21 +244,104 @@ class GuideExpressApp(tk.Tk):
                 f"{missing} etape(s) ignoree(s) : leur image brute est introuvable sur le disque.",
             )
 
+    @staticmethod
+    def _session_date(path: Path) -> datetime.datetime:
+        """Date de creation d'une session. Les dossiers de session sont
+        toujours nommes par _start_recording() via time.strftime("%Y%m%d-%H%M%S") :
+        on privilegie ce nom, fiable et independant du systeme de fichiers,
+        et on ne retombe sur la date de derniere modification du dossier que
+        pour un dossier au nom non standard (renomme manuellement, etc.)."""
+        try:
+            return datetime.datetime.strptime(path.name, "%Y%m%d-%H%M%S")
+        except ValueError:
+            return datetime.datetime.fromtimestamp(path.stat().st_mtime)
+
+    @staticmethod
+    def _delete_session_paths(session_paths: list) -> list:
+        """Supprime chaque dossier de session de la liste. Une erreur sur
+        l'un d'eux (fichier verrouille, permissions, etc.) est capturee et
+        n'empeche pas la suppression des suivants - meme esprit que le reste
+        du projet : ne jamais laisser un echec individuel bloquer le
+        traitement des autres elements. Renvoie la liste des echecs sous
+        forme de tuples (nom_session, message_erreur)."""
+        failures = []
+        for session_path in session_paths:
+            try:
+                shutil.rmtree(session_path)
+            except OSError as exc:
+                failures.append((session_path.name, str(exc)))
+        return failures
+
+    @staticmethod
+    def _report_delete_failures(failures: list, total: int) -> None:
+        if not failures:
+            return
+        details = "\n".join(f"- {name} : {err}" for name, err in failures)
+        messagebox.showwarning(
+            "Suppression partielle",
+            f"{len(failures)} session(s) sur {total} n'ont pas pu etre supprimee(s) :\n\n{details}",
+        )
+
     def _delete_session(self, tree):
+        # Le Treeview est en mode de selection "extended" (defaut de
+        # ttk.Treeview, jamais restreint explicitement ici) : l'utilisateur
+        # peut selectionner plusieurs sessions a la fois (Ctrl/Shift-clic).
+        # Une version precedente ne traitait que selection[0], supprimant
+        # silencieusement une seule session meme quand plusieurs etaient
+        # cochees (bug trouve a l'audit).
         selection = tree.selection()
         if not selection:
-            messagebox.showinfo("Gerer les sessions", "Selectionnez une session d'abord.")
+            messagebox.showinfo("Gerer les sessions", "Selectionnez au moins une session d'abord.")
             return
-        session_path = Path(selection[0])
+        session_paths = [Path(iid) for iid in selection]
+        count = len(session_paths)
+        if count == 1:
+            message = (
+                f"Supprimer definitivement la session '{session_paths[0].name}' et toutes ses captures ?\n"
+                "Cette action est irreversible."
+            )
+        else:
+            names = "\n".join(f"- {p.name}" for p in session_paths)
+            message = (
+                f"Supprimer {count} session(s) ?\n\n{names}\n\n"
+                "Cette action est irreversible."
+            )
+        if not messagebox.askyesno("Supprimer la session" if count == 1 else "Supprimer les sessions", message):
+            return
+        failures = self._delete_session_paths(session_paths)
+        self._build_sessions_view()
+        self._report_delete_failures(failures, count)
+
+    def _delete_old_sessions(self):
+        # Complement a la suppression multi-selection ci-dessus : purge en
+        # un coup les sessions plus anciennes qu'un nombre de jours donne,
+        # sans avoir a toutes les selectionner manuellement (voir README,
+        # section Confidentialite, qui documentait jusqu'ici uniquement le
+        # vidage manuel du dossier de sessions).
+        days = simpledialog.askinteger(
+            "Supprimer les anciennes sessions",
+            "Supprimer les sessions vieilles de plus de combien de jours ?",
+            parent=self, minvalue=0,
+        )
+        if days is None:
+            return
+        cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+        old_paths = [path for path, _files, _size in self._list_sessions() if self._session_date(path) < cutoff]
+        if not old_paths:
+            messagebox.showinfo(
+                "Supprimer les anciennes sessions",
+                f"Aucune session de plus de {days} jour(s).",
+            )
+            return
         if not messagebox.askyesno(
-            "Supprimer la session",
-            f"Supprimer definitivement la session '{session_path.name}' et toutes ses captures ?\n"
-            "Cette action est irreversible.",
+            "Supprimer les anciennes sessions",
+            f"Supprimer definitivement {len(old_paths)} session(s) de plus de {days} jour(s) "
+            "et toutes leurs captures ?\nCette action est irreversible.",
         ):
             return
-        import shutil
-        shutil.rmtree(session_path, ignore_errors=True)
+        failures = self._delete_session_paths(old_paths)
         self._build_sessions_view()
+        self._report_delete_failures(failures, len(old_paths))
 
     # ------------------------------------------------------------------
     # Enregistrement

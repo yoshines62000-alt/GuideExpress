@@ -100,8 +100,11 @@ python -m pip install -r requirements.txt
   mais elle ne s'applique qu'à l'export : la capture brute (non rédigée) reste
   dans `~/.guide_express/sessions/`. **GuideExpress ne supprime jamais
   automatiquement ces sessions** : si vous partagez votre ordinateur, pensez
-  à vider ce dossier manuellement après avoir exporté un guide contenant des
-  informations sensibles.
+  à les supprimer après avoir exporté un guide contenant des informations
+  sensibles — via l'écran "Gérer les sessions enregistrées" (sélection
+  multiple avec Ctrl/Shift-clic, ou suppression en un coup de toutes les
+  sessions plus anciennes qu'un nombre de jours donné), ou en vidant le
+  dossier manuellement.
 
 ## Créer un exécutable autonome (.exe)
 

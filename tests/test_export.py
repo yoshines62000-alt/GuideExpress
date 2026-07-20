@@ -134,6 +134,34 @@ class ExportTestCase(unittest.TestCase):
         with Image.open(out_dir / "images" / "etape-001.png") as img:
             self.assertEqual(img.size, (520, 520))
 
+    def test_export_html_resizes_oversized_images(self):
+        # Une capture large (ex: bureau virtuel multi-ecrans en 4K) ne doit
+        # jamais etre encodee en pleine resolution dans le HTML : sans cette
+        # limite, un guide de plusieurs dizaines d'etapes pourrait produire
+        # un fichier de plusieurs centaines de Mo (bug trouve a l'audit).
+        huge_raw = self.tmp / "huge_raw.png"
+        Image.new("RGB", (2400, 1200), color=(7, 7, 7)).save(huge_raw)
+        huge_step = cap.Step(
+            index=1, raw_image_path=huge_raw, click_x=100, click_y=100,
+            window_title="Fenetre", timestamp="t1",
+        )
+        png_bytes = exp._step_to_png_bytes(huge_step, zoom=False)
+        img = Image.open(__import__("io").BytesIO(png_bytes))
+        self.assertEqual(img.width, exp._EXPORT_IMAGE_MAX_WIDTH)
+        self.assertEqual(img.height, 700)  # 1200 * (1400 / 2400)
+
+    def test_export_markdown_resizes_oversized_images(self):
+        huge_raw = self.tmp / "huge_raw_md.png"
+        Image.new("RGB", (2400, 1200), color=(7, 7, 7)).save(huge_raw)
+        huge_step = cap.Step(
+            index=1, raw_image_path=huge_raw, click_x=100, click_y=100,
+            window_title="Fenetre", timestamp="t1",
+        )
+        out_dir = self.tmp / "export_huge_md"
+        exp.export_markdown([huge_step], "Titre", out_dir)
+        with Image.open(out_dir / "images" / "etape-001.png") as img:
+            self.assertEqual(img.width, exp._EXPORT_IMAGE_MAX_WIDTH)
+
     def test_export_pdf_generates_one_page_per_step(self):
         out = self.tmp / "guide.pdf"
         exp.export_pdf(self.steps, "Mon Guide PDF", out)
