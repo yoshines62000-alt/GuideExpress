@@ -10,6 +10,7 @@ sont enregistrees. Aucune frappe clavier n'est jamais interceptee.
 
 from __future__ import annotations
 
+import ctypes
 import queue
 import threading
 import time
@@ -31,6 +32,39 @@ def _grab_screenshot():
     except TypeError:
         # Anciennes versions de Pillow sans le parametre all_screens.
         return ImageGrab.grab()
+
+
+def _virtual_screen_origin() -> tuple:
+    """Origine (coin superieur gauche) du bureau virtuel Windows, en
+    coordonnees ecran absolues.
+
+    Cette origine vaut (0, 0) tant que le moniteur principal occupe le coin
+    superieur gauche du bureau virtuel - le cas le plus courant. Mais des
+    qu'un moniteur secondaire est place a gauche ou au-dessus du moniteur
+    principal dans la configuration d'affichage Windows, elle devient
+    negative (ex: (-1920, 0) pour un second ecran de 1920px place a gauche).
+
+    `ImageGrab.grab(all_screens=True)` capture bien tout le bureau virtuel,
+    origine negative comprise, mais l'image Pillow renvoyee ne conserve
+    aucune trace de cette origine : ses pixels commencent toujours a (0, 0)
+    dans le repere de l'IMAGE, meme si le coin superieur gauche captured
+    correspond a un point negatif du bureau virtuel. Les coordonnees de clic
+    fournies par pynput (x, y dans _on_click), elles, restent dans le repere
+    ECRAN ABSOLU du bureau virtuel. Sans recalculer cette origine et la
+    soustraire, click_x/click_y stockes ne seraient plus dans le meme repere
+    que l'image capturee des qu'un ecran secondaire est ainsi positionne : le
+    marqueur de clic serait dessine au mauvais endroit (voire hors image).
+
+    Renvoie (0, 0) si indisponible (hors Windows, echec de l'appel) - ce qui
+    correspond exactement au cas mono-ecran/ecran principal seul, pour lequel
+    le comportement doit rester inchange."""
+    try:
+        user32 = ctypes.windll.user32
+        SM_XVIRTUALSCREEN = 76
+        SM_YVIRTUALSCREEN = 77
+        return (user32.GetSystemMetrics(SM_XVIRTUALSCREEN), user32.GetSystemMetrics(SM_YVIRTUALSCREEN))
+    except (AttributeError, OSError):
+        return (0, 0)
 
 
 class Recorder:
@@ -156,6 +190,7 @@ class Recorder:
             self._counter += 1
             idx = self._counter
             screenshot = _grab_screenshot()
+            origin_x, origin_y = _virtual_screen_origin()
         except Exception as exc:  # noqa: BLE001 - callback de hook systeme :
             # une exception non geree ici tuerait le thread d'ecoute pynput
             # sans que rien ne le signale a l'utilisateur (meme categorie de
@@ -168,8 +203,13 @@ class Recorder:
         self._save_queue.put({
             "index": idx,
             "image": screenshot,
-            "click_x": x,
-            "click_y": y,
+            # Coordonnees ramenees dans le repere de l'image capturee (voir
+            # _virtual_screen_origin) - reste un simple no-op (- 0, - 0) tant
+            # que le moniteur principal est en (0, 0) du bureau virtuel, ce
+            # qui couvre le cas mono-ecran et la grande majorite des
+            # configurations multi-ecrans.
+            "click_x": x - origin_x,
+            "click_y": y - origin_y,
             "button": "left" if button == mouse.Button.left else "right",
             "window_title": get_window_title_at_point(x, y),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),

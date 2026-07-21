@@ -403,8 +403,35 @@ class GuideExpressApp(tk.Tk):
         hud_cy = self.hud.winfo_rooty() + self.hud.winfo_height() // 2
         hud_hwnd = get_window_at_point(hud_cx, hud_cy)
         excluded = {hud_hwnd} if hud_hwnd else set()
-        self.recorder = Recorder(session_dir, excluded_hwnds=excluded)
-        self.recorder.start()
+        # Cree ET demarre le Recorder dans le meme bloc protege : la creation
+        # (mkdir du dossier de session) et le demarrage (installation du hook
+        # souris bas-niveau pynput) peuvent tous deux echouer independamment
+        # (dossier non accessible en ecriture ; permissions/antivirus/EDR
+        # bloquant l'installation du hook). Sans cette protection, l'exception
+        # remontait non geree APRES self.withdraw()/self._open_hud() : la
+        # fenetre principale restait cachee et le HUD bloque a "0 etape(s)",
+        # sans aucun moyen visible de s'en sortir ni le moindre message
+        # d'erreur (bug trouve a l'audit).
+        try:
+            self.recorder = Recorder(session_dir, excluded_hwnds=excluded)
+            self.recorder.start()
+        except Exception as exc:  # noqa: BLE001 - toute cause d'echec doit
+            # ramener l'utilisateur a un etat utilisable (fenetre visible,
+            # message clair) plutot que le laisser bloque sans recours.
+            self.recorder = None
+            if self.hud is not None:
+                self.hud.destroy()
+                self.hud = None
+            self.deiconify()
+            messagebox.showerror(
+                "Enregistrement impossible",
+                "L'enregistrement n'a pas pu demarrer.\n\n"
+                "Causes possibles : permissions insuffisantes, antivirus/EDR "
+                "bloquant l'ecoute de la souris, ou dossier de session "
+                "inaccessible en ecriture.\n\n"
+                f"Detail : {exc}",
+            )
+            return
         self.after(150, self._poll_events)
 
     def _open_hud(self):
@@ -683,8 +710,28 @@ class GuideExpressApp(tk.Tk):
         # reprise precedente de la MEME etape (meme uid), et sur un dossier
         # distinct pour toute autre etape, dupliquee ou non.
         retake_dir = self.session_dir / "retakes" / step.uid
-        self._retake_recorder = Recorder(retake_dir, excluded_hwnds=excluded)
-        self._retake_recorder.start()
+        # Meme protection que _start_recording (voir son commentaire) : la
+        # reprise passe elle aussi par self.withdraw() avant de creer/demarrer
+        # le Recorder, donc le meme risque de fenetre cachee + HUD bloque sans
+        # message d'erreur s'applique ici a l'identique.
+        try:
+            self._retake_recorder = Recorder(retake_dir, excluded_hwnds=excluded)
+            self._retake_recorder.start()
+        except Exception as exc:  # noqa: BLE001
+            self._retake_recorder = None
+            if self.hud is not None:
+                self.hud.destroy()
+                self.hud = None
+            self.deiconify()
+            messagebox.showerror(
+                "Reprise impossible",
+                "La reprise de cette etape n'a pas pu demarrer.\n\n"
+                "Causes possibles : permissions insuffisantes, antivirus/EDR "
+                "bloquant l'ecoute de la souris, ou dossier de session "
+                "inaccessible en ecriture.\n\n"
+                f"Detail : {exc}",
+            )
+            return
         self.after(150, self._poll_retake)
 
     def _open_retake_hud(self, step):

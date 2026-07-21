@@ -179,6 +179,71 @@ class RecorderTestCase(RecorderTestBase):
         self.recorder.stop()
         self.assertFalse(self.recorder.is_paused)
 
+    def test_start_propagates_listener_installation_failure(self):
+        # start() n'avale volontairement aucune exception venant de
+        # l'installation du hook pynput (permissions, antivirus/EDR...) :
+        # c'est a l'appelant (gui.py) de la traiter pour remettre
+        # l'utilisateur dans un etat utilisable. Verrouille que l'appelant
+        # peut bien compter sur cette propagation.
+        fresh = Recorder(self.tmp / "session_fresh")
+        self.addCleanup(fresh.shutdown)
+        with mock.patch.object(mouse.Listener, "start", side_effect=OSError("hook refuse")):
+            with self.assertRaises(OSError):
+                fresh.start()
+
+
+class VirtualScreenOffsetTestCase(RecorderTestBase):
+    """Sur une configuration multi-ecrans ou un moniteur secondaire est place
+    a gauche/au-dessus du principal, l'origine du bureau virtuel Windows
+    (SM_XVIRTUALSCREEN/SM_YVIRTUALSCREEN) peut etre negative. Les coordonnees
+    de clic fournies par pynput restent dans ce repere ecran absolu, alors que
+    l'image capturee par ImageGrab.grab(all_screens=True) ne conserve aucune
+    trace de cette origine (ses pixels commencent toujours a (0, 0)) - sans
+    correction, click_x/click_y stockes ne correspondraient plus au meme
+    repere que l'image, et le marqueur de clic serait dessine au mauvais
+    endroit (voire hors image). Ces tests verrouillent la soustraction de
+    cette origine avant stockage."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.recorder = Recorder(self.tmp / "session")
+        self.addCleanup(self.recorder.shutdown)
+        self.recorder._active = True
+
+    def test_mono_screen_origin_leaves_coordinates_unchanged(self):
+        # Cas mono-ecran (ou ecran principal en (0, 0) du bureau virtuel,
+        # l'immense majorite des configurations) : aucune regression attendue.
+        with mock.patch.object(recorder_mod, "_virtual_screen_origin", return_value=(0, 0)):
+            self.recorder._on_click(120, 80, mouse.Button.left, True)
+        self.recorder.wait_for_pending_saves()
+        event = self.recorder.events.get()
+        self.assertEqual((event["click_x"], event["click_y"]), (120, 80))
+
+    def test_negative_virtual_origin_is_subtracted_from_click_coordinates(self):
+        # Second ecran place a gauche du principal : origine typiquement
+        # (-1920, 0). Un clic effectue sur ce second ecran, a la coordonnee
+        # ecran absolue (-1800, 100), doit etre stocke relatif a l'image
+        # capturee, soit (-1800 - (-1920), 100 - 0) = (120, 100).
+        with mock.patch.object(recorder_mod, "_virtual_screen_origin", return_value=(-1920, 0)):
+            self.recorder._on_click(-1800, 100, mouse.Button.left, True)
+        self.recorder.wait_for_pending_saves()
+        event = self.recorder.events.get()
+        self.assertEqual((event["click_x"], event["click_y"]), (120, 100))
+
+    def test_negative_vertical_virtual_origin_is_subtracted(self):
+        # Second ecran place au-dessus du principal : origine typiquement
+        # (0, -1080).
+        with mock.patch.object(recorder_mod, "_virtual_screen_origin", return_value=(0, -1080)):
+            self.recorder._on_click(300, -900, mouse.Button.left, True)
+        self.recorder.wait_for_pending_saves()
+        event = self.recorder.events.get()
+        self.assertEqual((event["click_x"], event["click_y"]), (300, 180))
+
+    def test_virtual_screen_origin_degrades_to_zero_zero_on_error(self):
+        with mock.patch("ctypes.windll.user32.GetSystemMetrics", side_effect=OSError("boom")):
+            self.assertEqual(recorder_mod._virtual_screen_origin(), (0, 0))
+
 
 class ErrorHandlingTestCase(RecorderTestBase):
     """Une erreur de capture ou d'ecriture ne doit jamais faire disparaitre
