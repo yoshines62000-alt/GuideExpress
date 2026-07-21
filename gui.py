@@ -68,9 +68,25 @@ class GuideExpressApp(tk.Tk):
         self.session_dir: Path | None = None
         self.hud: tk.Toplevel | None = None
         self._retake_recorder: Recorder | None = None
-        self._retake_index: int | None = None
+        self._retake_step_obj = None
         self.title_var = tk.StringVar(value="Mon guide")
-        self._thumbnail_refs: list = []
+        # Cache des miniatures deja rendues, indexe par step.uid (identifiant
+        # stable d'une etape, independant de sa position dans self.steps -
+        # voir capture.Step.uid). Sans ce cache, _build_review_view devait
+        # rouvrir et redecoder l'image brute de CHAQUE etape a CHAQUE
+        # mutation (deplacement, suppression, coche de zoom...), meme quand
+        # aucune image n'avait change : 14.8s mesures pour reconstruire la
+        # relecture d'un guide de 150 etapes en 4K apres une seule action
+        # (trouvaille d'audit Phase 3, chiffree empiriquement). Invalide au
+        # cas par cas (pop de l'entree correspondante) uniquement quand le
+        # RENDU d'une etape change reellement (redaction, reprise, zoom) -
+        # jamais pour un simple reordonnancement, qui ne touche aucune image.
+        self._thumbnail_cache: dict = {}
+        # Widgets de chaque carte d'etape, indexes par step.uid : permet de
+        # reordonner/mettre a jour une carte existante sans la detruire et la
+        # reconstruire (donc sans jamais rappeler render_step_image) pour les
+        # operations qui ne changent pas son contenu.
+        self._rows: dict = {}
         self._container = ttk.Frame(self)
         self._container.pack(fill="both", expand=True)
 
@@ -273,6 +289,7 @@ class GuideExpressApp(tk.Tk):
         self.session_dir = session_path
         self.title_var.set(meta.get("title", "Mon guide"))
         self.steps = steps
+        self._thumbnail_cache = {}  # session rouverte : rien a reutiliser d'une session precedente
         self._build_review_view()
         if missing:
             messagebox.showwarning(
@@ -387,6 +404,7 @@ class GuideExpressApp(tk.Tk):
         session_dir = SESSIONS_DIR / time.strftime("%Y%m%d-%H%M%S")
         self.session_dir = session_dir
         self.steps = []
+        self._thumbnail_cache = {}  # nouvelle session : rien a reutiliser de la precedente
 
         self.withdraw()
         self._open_hud()
@@ -541,14 +559,20 @@ class GuideExpressApp(tk.Tk):
     # ------------------------------------------------------------------
 
     def _build_review_view(self):
-        # Appele apres CHAQUE mutation de self.steps (arret d'enregistrement,
-        # reprise, deplacement, suppression, duplication, zoom, redaction) :
-        # un seul point d'appel suffit donc a garder session.json a jour en
-        # permanence, sans avoir a l'ajouter individuellement a chaque
-        # gestionnaire d'evenement.
+        # Construction COMPLETE de l'ecran de relecture : appelee uniquement
+        # aux points d'entree qui remplacent entierement self.steps (fin
+        # d'enregistrement, reouverture de session) ou quand la liste devient
+        # vide (cas rare, pas de contrainte de performance). Les mutations
+        # courantes (deplacer/supprimer/dupliquer/zoomer/rediger/reprendre)
+        # passent desormais par des mises a jour incrementales (voir
+        # _reorder_and_repack, _refresh_row_image, _remove_row,
+        # _insert_row_after) qui evitent de detruire et reconstruire TOUTES
+        # les cartes et de rappeler render_step_image() pour CHAQUE etape a
+        # chaque action - 14.8s mesures sur 150 etapes en 4K pour une seule
+        # action avant cette optimisation (trouvaille d'audit Phase 3).
         self._save_session_meta()
         self._clear_container()
-        self._thumbnail_refs = []
+        self._rows = {}
 
         top = ttk.Frame(self._container, padding=(10, 10, 10, 0))
         top.pack(fill="x")
@@ -563,7 +587,8 @@ class GuideExpressApp(tk.Tk):
         # (bug trouve a l'audit).
         title_entry.bind("<FocusOut>", lambda e: self._save_session_meta())
         title_entry.bind("<Return>", lambda e: self._save_session_meta())
-        ttk.Label(top, text=f"{len(self.steps)} etape(s)").pack(side="left", padx=12)
+        self._step_count_var = tk.StringVar(value=f"{len(self.steps)} etape(s)")
+        ttk.Label(top, textvariable=self._step_count_var).pack(side="left", padx=12)
 
         list_frame = ttk.Frame(self._container)
         list_frame.pack(fill="both", expand=True, padx=10, pady=10)
@@ -577,43 +602,120 @@ class GuideExpressApp(tk.Tk):
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+        self._review_inner = inner  # reutilise par les insertions incrementales (duplication)
 
         if not self.steps:
             ttk.Label(inner, text="Aucune etape capturee (aucun clic detecte pendant l'enregistrement).").pack(pady=20)
 
-        self._row_frames = []
-        self._drag_index = None
-        for i, step in enumerate(self.steps):
-            self._build_step_row(inner, i)
+        self._drag_uid = None
+        for step in self.steps:
+            self._build_step_row(inner, step)
 
         bottom = ttk.Frame(self._container, padding=10)
         bottom.pack(fill="x")
         ttk.Button(bottom, text="Nouvel enregistrement", command=self._build_start_view).pack(side="left")
         state = "normal" if self.steps else "disabled"
-        ttk.Button(bottom, text="Exporter en HTML", command=self._export_html, state=state).pack(side="left", padx=6)
-        ttk.Button(bottom, text="Exporter en Markdown", command=self._export_markdown, state=state).pack(side="left")
-        ttk.Button(bottom, text="Exporter en PDF", command=self._export_pdf, state=state).pack(side="left", padx=6)
+        self._export_buttons = []
+        html_btn = ttk.Button(bottom, text="Exporter en HTML", command=self._export_html, state=state)
+        html_btn.pack(side="left", padx=6)
+        md_btn = ttk.Button(bottom, text="Exporter en Markdown", command=self._export_markdown, state=state)
+        md_btn.pack(side="left")
+        pdf_btn = ttk.Button(bottom, text="Exporter en PDF", command=self._export_pdf, state=state)
+        pdf_btn.pack(side="left", padx=6)
+        self._export_buttons = [html_btn, md_btn, pdf_btn]
 
-    def _build_step_row(self, parent, index):
-        step = self.steps[index]
-        row = ttk.Frame(parent, padding=8, relief="groove")
-        row.pack(fill="x", pady=4, padx=2)
-        self._row_frames.append(row)
-
-        grip = ttk.Label(row, text="⣿⣿", foreground="#888", cursor="fleur")
-        grip.pack(side="left", padx=(0, 8))
-        grip.bind("<ButtonPress-1>", lambda e, i=index: self._on_drag_start(i))
-        grip.bind("<ButtonRelease-1>", self._on_drag_drop)
-
+    def _get_thumbnail(self, step):
+        """Renvoie la miniature (PhotoImage) deja rendue pour cette etape si
+        elle est en cache, sinon la (re)genere depuis le disque et la met en
+        cache. Le cache est indexe par step.uid, invalide explicitement par
+        les gestionnaires d'evenements des qu'une mutation change reellement
+        le RENDU de l'etape (redaction, reprise, zoom) - jamais pour un
+        simple reordonnancement."""
+        cached = self._thumbnail_cache.get(step.uid)
+        if cached is not None:
+            return cached
         img = render_step_image(step, zoom=step.zoom)
         img.thumbnail(THUMBNAIL_MAX_SIZE)
         photo = ImageTk.PhotoImage(img)
-        self._thumbnail_refs.append(photo)
-        ttk.Label(row, image=photo).pack(side="left", padx=(0, 10))
+        self._thumbnail_cache[step.uid] = photo
+        return photo
+
+    def _refresh_row_image(self, step):
+        """Recalcule uniquement la miniature d'UNE etape (dont le cache a
+        deja ete invalide par l'appelant) et met a jour la carte existante
+        en place, sans toucher aux autres cartes ni a l'ordre d'affichage."""
+        row_info = self._rows.get(step.uid)
+        if row_info is None:
+            return
+        photo = self._get_thumbnail(step)
+        row_info["img_label"].configure(image=photo)
+        row_info["img_label"].image = photo
+
+    def _update_step_count_and_buttons(self):
+        if hasattr(self, "_step_count_var"):
+            self._step_count_var.set(f"{len(self.steps)} etape(s)")
+        state = "normal" if self.steps else "disabled"
+        for btn in getattr(self, "_export_buttons", []):
+            btn.configure(state=state)
+
+    def _reorder_and_repack(self):
+        """Reapplique l'ordre courant de self.steps aux cartes DEJA
+        construites, sans reconstruire ni re-rendre aucune image : utilise
+        apres un deplacement (Haut/Bas/glisser-depose), qui ne change que la
+        POSITION des etapes, jamais le contenu d'aucune image. Repack (pas de
+        destruction/recreation de widgets) + mise a jour des libelles
+        "Etape N", qui eux changent bien pour toutes les cartes suivant le
+        point de deplacement."""
+        for step in self.steps:
+            row_info = self._rows.get(step.uid)
+            if row_info is None:
+                continue
+            row_info["frame"].pack_forget()
+            row_info["frame"].pack(fill="x", pady=4, padx=2)
+            row_info["index_var"].set(f"Etape {step.index}")
+
+    def _current_row_frames(self):
+        """Cartes actuellement affichees, dans l'ordre de self.steps -
+        recalcule a la volee (simple liste de references deja existantes,
+        cout negligeable) plutot que maintenu incrementalement en parallele."""
+        frames = []
+        for step in self.steps:
+            row_info = self._rows.get(step.uid)
+            if row_info is not None:
+                frames.append(row_info["frame"])
+        return frames
+
+    def _remove_row(self, step):
+        row_info = self._rows.pop(step.uid, None)
+        if row_info is not None:
+            row_info["frame"].destroy()
+        self._thumbnail_cache.pop(step.uid, None)
+
+    def _insert_row_after(self, step, after_step):
+        after_frame = self._rows[after_step.uid]["frame"] if after_step is not None else None
+        self._build_step_row(self._review_inner, step, after=after_frame)
+
+    def _build_step_row(self, parent, step, *, after=None):
+        row = ttk.Frame(parent, padding=8, relief="groove")
+        pack_kwargs = {"fill": "x", "pady": 4, "padx": 2}
+        if after is not None:
+            pack_kwargs["after"] = after
+        row.pack(**pack_kwargs)
+
+        grip = ttk.Label(row, text="⣿⣿", foreground="#888", cursor="fleur")
+        grip.pack(side="left", padx=(0, 8))
+        grip.bind("<ButtonPress-1>", lambda e, s=step: self._on_drag_start(s))
+        grip.bind("<ButtonRelease-1>", self._on_drag_drop)
+
+        photo = self._get_thumbnail(step)
+        img_label = ttk.Label(row, image=photo)
+        img_label.image = photo
+        img_label.pack(side="left", padx=(0, 10))
 
         mid = ttk.Frame(row)
         mid.pack(side="left", fill="both", expand=True)
-        ttk.Label(mid, text=f"Etape {step.index}", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        index_var = tk.StringVar(value=f"Etape {step.index}")
+        ttk.Label(mid, textvariable=index_var, font=("Segoe UI", 9, "bold")).pack(anchor="w")
         desc_var = tk.StringVar(value=step.description)
         entry = ttk.Entry(mid, textvariable=desc_var, width=50)
         entry.pack(anchor="w", fill="x", pady=(2, 0))
@@ -633,7 +735,7 @@ class GuideExpressApp(tk.Tk):
         zoom_var = tk.BooleanVar(value=step.zoom)
         zoom_check = ttk.Checkbutton(
             mid, text="Zoomer sur la zone du clic", variable=zoom_var,
-            command=lambda s=step, v=zoom_var, i=index: self._toggle_zoom(i, s, v),
+            command=lambda s=step, v=zoom_var: self._toggle_zoom(s, v),
         )
         zoom_check.pack(anchor="w", pady=(4, 0))
 
@@ -649,41 +751,71 @@ class GuideExpressApp(tk.Tk):
         btns_row1.pack(anchor="e")
         btns_row2 = ttk.Frame(btns)
         btns_row2.pack(anchor="e", pady=(4, 0))
-        ttk.Button(btns_row1, text="Haut", width=6, command=lambda i=index: self._move(i, -1)).pack(side="left", padx=2)
-        ttk.Button(btns_row1, text="Bas", width=6, command=lambda i=index: self._move(i, +1)).pack(side="left", padx=2)
-        ttk.Button(btns_row1, text="Rediger", width=8, command=lambda i=index: self._open_redaction_editor(i)).pack(side="left", padx=2)
-        ttk.Button(btns_row2, text="Reprendre", width=9, command=lambda i=index: self._retake_step(i)).pack(side="left", padx=2)
-        ttk.Button(btns_row2, text="Dupliquer", width=9, command=lambda i=index: self._duplicate(i)).pack(side="left", padx=2)
-        ttk.Button(btns_row2, text="Supprimer", width=9, command=lambda i=index: self._delete(i)).pack(side="left", padx=2)
+        ttk.Button(btns_row1, text="Haut", width=6, command=lambda s=step: self._move(s, -1)).pack(side="left", padx=2)
+        ttk.Button(btns_row1, text="Bas", width=6, command=lambda s=step: self._move(s, +1)).pack(side="left", padx=2)
+        ttk.Button(btns_row1, text="Rediger", width=8, command=lambda s=step: self._open_redaction_editor(s)).pack(side="left", padx=2)
+        ttk.Button(btns_row2, text="Reprendre", width=9, command=lambda s=step: self._retake_step(s)).pack(side="left", padx=2)
+        ttk.Button(btns_row2, text="Dupliquer", width=9, command=lambda s=step: self._duplicate(s)).pack(side="left", padx=2)
+        ttk.Button(btns_row2, text="Supprimer", width=9, command=lambda s=step: self._delete(s)).pack(side="left", padx=2)
 
-    def _toggle_zoom(self, index, step, zoom_var):
+        self._rows[step.uid] = {"frame": row, "index_var": index_var, "img_label": img_label}
+        return row
+
+    def _toggle_zoom(self, step, zoom_var):
         step.zoom = zoom_var.get()
-        self._build_review_view()
+        # Seule l'image de CETTE etape change (cadrage zoome ou non) : on
+        # invalide uniquement son entree de cache et on ne re-rend que sa
+        # carte, au lieu de reconstruire toute la vue de relecture.
+        self._thumbnail_cache.pop(step.uid, None)
+        self._save_session_meta()
+        self._refresh_row_image(step)
 
-    def _move(self, index, direction):
+    def _move(self, step, direction):
+        # Haut/Bas ne change que la POSITION des etapes, jamais le contenu
+        # d'aucune image : aucune miniature n'a besoin d'etre re-rendue,
+        # seul l'ordre d'affichage et les libelles "Etape N" doivent l'etre.
+        index = self.steps.index(step)
         move_step(self.steps, index, direction)
-        self._build_review_view()
+        self._reorder_and_repack()
+        self._save_session_meta()
 
-    def _delete(self, index):
+    def _delete(self, step):
         if not messagebox.askyesno("Supprimer l'etape", "Supprimer cette etape du guide ?"):
             return
+        index = self.steps.index(step)
         delete_step(self.steps, index)
-        self._build_review_view()
+        self._remove_row(step)
+        if not self.steps:
+            # Cas rare (derniere etape supprimee) : reconstruction complete
+            # pour reafficher le message "Aucune etape capturee" et
+            # desactiver les boutons d'export, sans logique dediee pour un
+            # etat qui ne se produit qu'une fois par guide au plus.
+            self._build_review_view()
+            return
+        for s in self.steps:
+            self._rows[s.uid]["index_var"].set(f"Etape {s.index}")
+        self._save_session_meta()
+        self._update_step_count_and_buttons()
 
-    def _duplicate(self, index):
+    def _duplicate(self, step):
         # Utile pour scinder une etape en deux instructions distinctes sur la
         # meme capture d'ecran (ex: "cliquez ici" puis "verifiez que ceci
         # apparait"), sans avoir a reprendre une nouvelle capture.
+        index = self.steps.index(step)
         duplicate_step(self.steps, index)
-        self._build_review_view()
+        new_step = self.steps[index + 1]
+        self._insert_row_after(new_step, step)
+        for s in self.steps:
+            self._rows[s.uid]["index_var"].set(f"Etape {s.index}")
+        self._save_session_meta()
+        self._update_step_count_and_buttons()
 
     # ------------------------------------------------------------------
     # Reprise (re-capture) d'une seule etape, sans refaire tout l'enregistrement
     # ------------------------------------------------------------------
 
-    def _retake_step(self, index):
-        step = self.steps[index]
-        self._retake_index = index
+    def _retake_step(self, step):
+        self._retake_step_obj = step
         self.withdraw()
         self._open_retake_hud(step)
 
@@ -781,9 +913,8 @@ class GuideExpressApp(tk.Tk):
         self._retake_recorder.shutdown()
         self._retake_recorder = None
 
-        index = self._retake_index
-        self._retake_index = None
-        step = self.steps[index]
+        step = self._retake_step_obj
+        self._retake_step_obj = None
         step.raw_image_path = data["raw_image_path"]
         step.click_x = data["click_x"]
         step.click_y = data["click_y"]
@@ -800,7 +931,12 @@ class GuideExpressApp(tk.Tk):
             self.hud.destroy()
             self.hud = None
         self.deiconify()
-        self._build_review_view()
+        # Seule l'image de CETTE etape a change (nouvelle capture) : sa
+        # position dans la liste, son index affiche et toutes les autres
+        # cartes restent inchanges, inutile de reconstruire toute la vue.
+        self._thumbnail_cache.pop(step.uid, None)
+        self._save_session_meta()
+        self._refresh_row_image(step)
 
     def _cancel_retake(self):
         if self._retake_recorder is not None:
@@ -818,20 +954,23 @@ class GuideExpressApp(tk.Tk):
                     pass
             self._retake_recorder.shutdown()
             self._retake_recorder = None
-        self._retake_index = None
+        self._retake_step_obj = None
         if self.hud is not None:
             self.hud.destroy()
             self.hud = None
         self.deiconify()
 
-    def _on_drag_start(self, index):
-        self._drag_index = index
+    def _on_drag_start(self, step):
+        self._drag_uid = step.uid
 
     def _on_drag_drop(self, event):
-        if self._drag_index is None:
+        if self._drag_uid is None:
             return
-        drag_index = self._drag_index
-        self._drag_index = None
+        drag_uid = self._drag_uid
+        self._drag_uid = None
+        drag_index = next((i for i, s in enumerate(self.steps) if s.uid == drag_uid), None)
+        if drag_index is None:
+            return
         # event.x_root/y_root donnent la position ecran reelle du curseur au
         # relachement, independamment du widget qui a recu l'evenement (le
         # "grab" implicite de Tkinter livre toujours le ButtonRelease a la
@@ -840,15 +979,20 @@ class GuideExpressApp(tk.Tk):
         target_index = self._row_index_of(widget)
         if target_index is None or target_index == drag_index:
             return
+        # Un glisser-depose ne change que la POSITION des etapes, jamais le
+        # contenu d'aucune image : meme optimisation que _move (voir son
+        # commentaire), aucune miniature n'a besoin d'etre re-rendue.
         move_step_to(self.steps, drag_index, target_index)
-        self._build_review_view()
+        self._reorder_and_repack()
+        self._save_session_meta()
 
     def _row_index_of(self, widget):
         """Remonte la hierarchie de widgets depuis `widget` jusqu'a trouver
         une des lignes d'etape connues, et renvoie sa position (0-based)."""
+        row_frames = self._current_row_frames()
         while widget is not None:
-            if widget in self._row_frames:
-                return self._row_frames.index(widget)
+            if widget in row_frames:
+                return row_frames.index(widget)
             widget = widget.master
         return None
 
@@ -856,8 +1000,7 @@ class GuideExpressApp(tk.Tk):
     # Editeur de redaction (masquage de zones sensibles)
     # ------------------------------------------------------------------
 
-    def _open_redaction_editor(self, index):
-        step = self.steps[index]
+    def _open_redaction_editor(self, step):
         try:
             # Toujours zoom=False ici, meme si step.zoom est active : les
             # coordonnees de redaction sont stockees en absolu par rapport a
@@ -880,7 +1023,7 @@ class GuideExpressApp(tk.Tk):
         editor = tk.Toplevel(self)
         editor.title(f"Rediger - Etape {step.index}")
         editor.transient(self)
-        editor.protocol("WM_DELETE_WINDOW", lambda: self._close_editor(editor, index))
+        editor.protocol("WM_DELETE_WINDOW", lambda: self._close_editor(editor, step))
         editor.grab_set()
 
         display_img = full_img.copy()
@@ -947,11 +1090,16 @@ class GuideExpressApp(tk.Tk):
                 _redraw()
 
         ttk.Button(btns, text="Annuler la derniere redaction", command=undo_last).pack(side="left", padx=4)
-        ttk.Button(btns, text="Terminer", command=lambda: self._close_editor(editor, index)).pack(side="left", padx=4)
+        ttk.Button(btns, text="Terminer", command=lambda: self._close_editor(editor, step)).pack(side="left", padx=4)
 
-    def _close_editor(self, editor, index):
+    def _close_editor(self, editor, step):
         editor.destroy()
-        self._build_review_view()
+        # Seule l'image de CETTE etape a change (redactions ajoutees ou
+        # retirees dans l'editeur) : pas besoin de reconstruire toute la vue
+        # de relecture, juste d'invalider son cache et de re-rendre sa carte.
+        self._thumbnail_cache.pop(step.uid, None)
+        self._save_session_meta()
+        self._refresh_row_image(step)
 
     # ------------------------------------------------------------------
     # Export
