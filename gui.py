@@ -49,8 +49,15 @@ class GuideExpressApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("GuideExpress - Guides pas-a-pas")
-        self.geometry("760x560")
-        self.minsize(620, 420)
+        # 900x560 (au lieu de 760x560) : a 760px, meme repartis sur deux
+        # rangees, les boutons "Rediger" et "Supprimer" de chaque carte
+        # d'etape depassaient encore la largeur de la fenetre - invisibles
+        # et inaccessibles sans agrandissement manuel, sans aucune barre de
+        # defilement horizontale pour les atteindre (trouvaille d'audit,
+        # verifiee empiriquement). 900px laisse une marge confortable sur un
+        # ecran 1920x1080 standard.
+        self.geometry("900x560")
+        self.minsize(760, 420)
         try:
             self.iconbitmap(str(_resource_path("icon.ico")))
         except tk.TclError:
@@ -603,14 +610,24 @@ class GuideExpressApp(tk.Tk):
         )
         zoom_check.pack(anchor="w", pady=(4, 0))
 
+        # Les 6 boutons d'action sont repartis sur deux rangees (au lieu
+        # d'une seule rangee de 6) pour rester visibles meme dans une
+        # fenetre de taille par defaut ou reduite : une seule rangee de 6
+        # boutons largeur fixe depassait la largeur de la carte et n'etait
+        # accessible qu'en agrandissant manuellement la fenetre, sans
+        # aucune barre de defilement horizontale ni indice visuel.
         btns = ttk.Frame(row)
         btns.pack(side="right")
-        ttk.Button(btns, text="Haut", width=6, command=lambda i=index: self._move(i, -1)).pack(side="left", padx=2)
-        ttk.Button(btns, text="Bas", width=6, command=lambda i=index: self._move(i, +1)).pack(side="left", padx=2)
-        ttk.Button(btns, text="Rediger", width=8, command=lambda i=index: self._open_redaction_editor(i)).pack(side="left", padx=2)
-        ttk.Button(btns, text="Reprendre", width=9, command=lambda i=index: self._retake_step(i)).pack(side="left", padx=2)
-        ttk.Button(btns, text="Dupliquer", width=9, command=lambda i=index: self._duplicate(i)).pack(side="left", padx=2)
-        ttk.Button(btns, text="Supprimer", width=9, command=lambda i=index: self._delete(i)).pack(side="left", padx=2)
+        btns_row1 = ttk.Frame(btns)
+        btns_row1.pack(anchor="e")
+        btns_row2 = ttk.Frame(btns)
+        btns_row2.pack(anchor="e", pady=(4, 0))
+        ttk.Button(btns_row1, text="Haut", width=6, command=lambda i=index: self._move(i, -1)).pack(side="left", padx=2)
+        ttk.Button(btns_row1, text="Bas", width=6, command=lambda i=index: self._move(i, +1)).pack(side="left", padx=2)
+        ttk.Button(btns_row1, text="Rediger", width=8, command=lambda i=index: self._open_redaction_editor(i)).pack(side="left", padx=2)
+        ttk.Button(btns_row2, text="Reprendre", width=9, command=lambda i=index: self._retake_step(i)).pack(side="left", padx=2)
+        ttk.Button(btns_row2, text="Dupliquer", width=9, command=lambda i=index: self._duplicate(i)).pack(side="left", padx=2)
+        ttk.Button(btns_row2, text="Supprimer", width=9, command=lambda i=index: self._delete(i)).pack(side="left", padx=2)
 
     def _toggle_zoom(self, index, step, zoom_var):
         step.zoom = zoom_var.get()
