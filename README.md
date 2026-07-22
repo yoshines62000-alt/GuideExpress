@@ -47,6 +47,12 @@ L'exécutable n'étant pas signé numériquement, Windows SmartScreen peut
 afficher un avertissement au premier lancement : cliquez sur **Informations
 complémentaires** puis **Exécuter quand même**.
 
+Au-delà de SmartScreen, un antivirus tiers (notamment en environnement
+d'entreprise, souvent plus agressif que Windows Defender grand public) peut
+occasionnellement mettre l'exécutable en quarantaine ou le bloquer au
+démarrage : voir [Limites connues](#limites-connues) pour le détail et la
+marche à suivre.
+
 ## Lancer depuis le code source
 
 Alternative à l'exécutable, pour les développeurs ou par souci de
@@ -106,6 +112,58 @@ python -m pip install -r requirements.txt
   sessions plus anciennes qu'un nombre de jours donné), ou en vidant le
   dossier manuellement.
 
+## Limites connues
+
+### Clics dans une fenêtre lancée en tant qu'administrateur
+
+GuideExpress capture les clics via un « hook » souris global bas niveau
+(nécessaire pour enregistrer même quand la fenêtre de GuideExpress n'a pas le
+focus, puisque vous travaillez dans d'autres applications pendant
+l'enregistrement) — voir la section [Installation](#installation), à propos
+de `pynput`. GuideExpress lui-même **ne demande jamais d'élévation** : il
+tourne toujours au niveau de droits de votre session Windows normale.
+
+Windows applique une barrière de sécurité (UIPI, *User Interface Privilege
+Isolation*) qui empêche un processus non élevé de recevoir les clics destinés
+à une fenêtre elle-même lancée **en tant qu'administrateur** (un assistant
+d'installation, un panneau de configuration protégé, un outil admin...). Si
+une étape de votre procédure se déroule dans une telle fenêtre, le clic n'y
+sera **pas capturé** — c'est une limite de sécurité du système d'exploitation,
+pas un bug de GuideExpress.
+
+Pendant un enregistrement actif, GuideExpress surveille la fenêtre au premier
+plan et affiche un avertissement explicite dans la fenêtre flottante
+(« Attention : fenêtre administrateur au premier plan ») dès qu'elle est
+détectée comme élevée, pour que vous ne découvriez pas l'étape manquante
+seulement en relisant votre guide. Si vous savez à l'avance qu'une procédure
+passera par une fenêtre élevée, la seule solution est de lancer GuideExpress
+lui-même « en tant qu'administrateur » (clic droit sur l'exécutable →
+Exécuter en tant qu'administrateur) le temps de cet enregistrement — une
+instance élevée peut capturer les clics des fenêtres non élevées aussi, donc
+à réserver aux cas où c'est réellement nécessaire.
+
+### Risque de faux positif antivirus
+
+Un hook souris global combiné à une capture d'écran automatique est un
+schéma comportemental proche de ce que les moteurs antivirus heuristiques
+associent aux outils de type keylogger/spyware — même si GuideExpress
+n'intercepte **aucune frappe clavier** (voir [Confidentialité](#confidentialité))
+et ne transmet jamais rien hors de votre machine. Combiné au fait que
+l'exécutable n'est pas signé numériquement (voir ci-dessus), certains
+antivirus — plus particulièrement en environnement d'entreprise — peuvent
+mettre l'exécutable en quarantaine ou le bloquer silencieusement, sans lien
+avec un quelconque bug du code.
+
+Pour limiter ce risque, l'exécutable publié n'utilise **pas** de compression
+UPX (`upx=False` dans `GuideExpress.spec`) : UPX est une technique également
+très utilisée par des malwares pour échapper à la détection par signature,
+et sa présence est un facteur aggravant bien identifié pour les faux positifs
+sur les exécutables PyInstaller. Si votre antivirus signale néanmoins
+l'exécutable, vous pouvez vérifier sa réputation par vous-même avant de
+l'exécuter, par exemple en le soumettant à
+[VirusTotal](https://www.virustotal.com/) (analyse par plusieurs dizaines de
+moteurs antivirus) plutôt que de vous fier à un seul verdict.
+
 ## Créer un exécutable autonome (.exe)
 
 Pour distribuer l'outil sans que le destinataire ait besoin d'installer
@@ -145,6 +203,7 @@ requirements.txt      # dependances (Pillow, pynput)
 Lancer.vbs            # raccourci de lancement double-clic (sans console)
 Lancer.bat            # raccourci de lancement double-clic (avec console, pour debug)
 GuideExpress.spec     # configuration de build PyInstaller (.exe autonome)
+GuideExpress.manifest  # manifeste Windows embarque (DPI-aware, pas d'elevation)
 icon.ico              # icone de l'application et de l'executable
 .gitignore
 LICENSE               # licence MIT

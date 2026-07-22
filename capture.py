@@ -49,9 +49,40 @@ try:
     _user32.GetWindowTextLengthW.restype = ctypes.c_int
     _user32.GetWindowTextW.argtypes = [_wintypes.HWND, _wintypes.LPWSTR, ctypes.c_int]
     _user32.GetWindowTextW.restype = ctypes.c_int
+    _user32.GetForegroundWindow.argtypes = []
+    _user32.GetForegroundWindow.restype = _wintypes.HWND
+    _user32.GetWindowThreadProcessId.argtypes = [_wintypes.HWND, ctypes.POINTER(_wintypes.DWORD)]
+    _user32.GetWindowThreadProcessId.restype = _wintypes.DWORD
 except (AttributeError, OSError):
     _wintypes = None
     _user32 = None
+
+# Signatures Win32 pour la detection UIPI/elevation (voir
+# foreground_window_is_elevated ci-dessous) : distinctes du bloc _user32
+# au-dessus, kernel32/advapi32 restent None independamment si l'un des deux
+# modules est indisponible.
+try:
+    _kernel32 = ctypes.windll.kernel32
+    _advapi32 = ctypes.windll.advapi32
+    _kernel32.OpenProcess.argtypes = [_wintypes.DWORD, _wintypes.BOOL, _wintypes.DWORD]
+    _kernel32.OpenProcess.restype = _wintypes.HANDLE
+    _kernel32.CloseHandle.argtypes = [_wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = _wintypes.BOOL
+    _kernel32.GetCurrentProcess.argtypes = []
+    _kernel32.GetCurrentProcess.restype = _wintypes.HANDLE
+    _advapi32.OpenProcessToken.argtypes = [_wintypes.HANDLE, _wintypes.DWORD, ctypes.POINTER(_wintypes.HANDLE)]
+    _advapi32.OpenProcessToken.restype = _wintypes.BOOL
+    _advapi32.GetTokenInformation.argtypes = [
+        _wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, _wintypes.DWORD, ctypes.POINTER(_wintypes.DWORD),
+    ]
+    _advapi32.GetTokenInformation.restype = _wintypes.BOOL
+    _advapi32.GetSidSubAuthorityCount.argtypes = [ctypes.c_void_p]
+    _advapi32.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+    _advapi32.GetSidSubAuthority.argtypes = [ctypes.c_void_p, _wintypes.DWORD]
+    _advapi32.GetSidSubAuthority.restype = ctypes.POINTER(_wintypes.DWORD)
+except (AttributeError, OSError):
+    _kernel32 = None
+    _advapi32 = None
 
 
 @dataclass
@@ -150,6 +181,142 @@ def get_window_text(hwnd) -> str:
     hook) elimine ce risque : un GetWindowTextW lent y est sans consequence
     pour la capture des clics suivants."""
     return _get_window_text(hwnd)
+
+
+# ---------------------------------------------------------------------------
+# Detection UIPI / fenetre elevee (trouvaille d'audit, dimension 6)
+# ---------------------------------------------------------------------------
+# Windows applique l'UIPI (User Interface Privilege Isolation) depuis Vista :
+# un processus de niveau d'integrite standard ne peut jamais recevoir, via un
+# hook bas niveau WH_MOUSE_LL comme celui utilise par pynput, les clics
+# destines a une fenetre appartenant a un processus de niveau d'integrite
+# SUPERIEUR (ex: une fenetre lancee "en tant qu'administrateur"). C'est une
+# barriere de securite du noyau, pas un bug de ce projet - mais sa
+# consequence est un clic totalement PERDU, sans la moindre exception ni
+# evenement cote Python : il n'existe donc structurellement AUCUN moyen de
+# detecter APRES COUP "un clic qui n'a pas ete capture", puisqu'aucun signal
+# n'atteint jamais l'application dans ce cas. La seule detection possible est
+# PROACTIVE : interroger periodiquement le niveau d'integrite de la fenetre
+# au premier plan et le comparer au notre, pour avertir l'utilisateur AVANT
+# qu'il ne clique dedans en pensant que ses actions sont enregistrees
+# (utilise par gui.GuideExpressApp pendant un enregistrement actif).
+
+_TOKEN_QUERY = 0x0008
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_TOKEN_INTEGRITY_LEVEL = 25  # TOKEN_INFORMATION_CLASS.TokenIntegrityLevel
+
+_own_integrity_level_cache = "not_computed_yet"  # sentinelle : distincte de None (echec) et de tout entier valide
+
+
+def _integrity_level_from_token_handle(h_token) -> Optional[int]:
+    """RID (dernier sub-authority du SID) porte par un jeton d'acces deja
+    ouvert. Renvoie None si indisponible - jamais d'exception."""
+    if _advapi32 is None:
+        return None
+    try:
+        size = _wintypes.DWORD(0)
+        _advapi32.GetTokenInformation(h_token, _TOKEN_INTEGRITY_LEVEL, None, 0, ctypes.byref(size))
+        if size.value == 0:
+            return None
+        buffer = ctypes.create_string_buffer(size.value)
+        ok = _advapi32.GetTokenInformation(h_token, _TOKEN_INTEGRITY_LEVEL, buffer, size.value, ctypes.byref(size))
+        if not ok:
+            return None
+        # TOKEN_MANDATORY_LABEL == { SID_AND_ATTRIBUTES Label } == { PSID Sid; DWORD Attributes; }
+        # Le premier pointeur du buffer est donc directement le PSID.
+        sid_ptr = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+        if not sid_ptr:
+            return None
+        count_ptr = _advapi32.GetSidSubAuthorityCount(sid_ptr)
+        if not count_ptr:
+            return None
+        rid_ptr = _advapi32.GetSidSubAuthority(sid_ptr, count_ptr[0] - 1)
+        if not rid_ptr:
+            return None
+        return rid_ptr[0]
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _own_integrity_level() -> Optional[int]:
+    """Niveau d'integrite du processus GuideExpress lui-meme - constant
+    pendant toute la duree de vie du processus, donc calcule une seule fois
+    et mis en cache."""
+    global _own_integrity_level_cache
+    if _own_integrity_level_cache == "not_computed_yet":
+        _own_integrity_level_cache = None
+        if _kernel32 is not None and _advapi32 is not None:
+            try:
+                h_process = _kernel32.GetCurrentProcess()  # pseudo-handle, jamais a fermer
+                h_token = _wintypes.HANDLE()
+                if _advapi32.OpenProcessToken(h_process, _TOKEN_QUERY, ctypes.byref(h_token)):
+                    try:
+                        _own_integrity_level_cache = _integrity_level_from_token_handle(h_token)
+                    finally:
+                        _kernel32.CloseHandle(h_token)
+            except (AttributeError, OSError):
+                _own_integrity_level_cache = None
+    return _own_integrity_level_cache
+
+
+def _process_integrity_level(pid: int) -> Optional[int]:
+    """Niveau d'integrite du processus `pid`. Renvoie None si indisponible
+    (processus protege par le systeme, permissions insuffisantes, deja
+    termine...) - un echec ici desactive simplement la detection, il ne doit
+    jamais remonter d'exception a l'appelant."""
+    if _kernel32 is None or _advapi32 is None or not pid:
+        return None
+    h_process = None
+    h_token = None
+    try:
+        h_process = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h_process:
+            return None
+        h_token = _wintypes.HANDLE()
+        if not _advapi32.OpenProcessToken(h_process, _TOKEN_QUERY, ctypes.byref(h_token)):
+            return None
+        return _integrity_level_from_token_handle(h_token)
+    except (AttributeError, OSError):
+        return None
+    finally:
+        if h_token:
+            try:
+                _kernel32.CloseHandle(h_token)
+            except OSError:
+                pass
+        if h_process:
+            try:
+                _kernel32.CloseHandle(h_process)
+            except OSError:
+                pass
+
+
+def foreground_window_is_elevated() -> Optional[bool]:
+    """True si la fenetre actuellement au premier plan appartient a un
+    processus de niveau d'integrite STRICTEMENT superieur a celui de
+    GuideExpress - dans ce cas, les clics qui y seront faits ne declencheront
+    jamais le hook (UIPI, voir commentaire de section ci-dessus). Renvoie
+    None si la comparaison est indisponible (hors Windows, echec d'un appel
+    Win32, processus protege...) : l'appelant doit alors traiter ce cas comme
+    "rien a signaler" plutot que comme une elevation averee, pour ne jamais
+    afficher un faux avertissement base sur une donnee inconnue."""
+    if _user32 is None:
+        return None
+    try:
+        hwnd = _user32.GetForegroundWindow()
+        if not hwnd:
+            return None
+        pid = _wintypes.DWORD(0)
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return None
+    except (AttributeError, OSError):
+        return None
+    own_level = _own_integrity_level()
+    target_level = _process_integrity_level(pid.value)
+    if own_level is None or target_level is None:
+        return None
+    return target_level > own_level
 
 
 def render_step_image(step: Step, zoom: bool = False) -> Image.Image:

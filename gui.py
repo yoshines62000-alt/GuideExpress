@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import datetime
 import json
 import logging
@@ -27,6 +28,7 @@ import update_checker
 from capture import (
     Step, render_step_image, move_step, move_step_to, delete_step, duplicate_step,
     sanitize_filename, get_window_at_point, step_to_dict, step_from_dict, renumber,
+    foreground_window_is_elevated,
 )
 from recorder import Recorder
 from export import export_html, export_markdown, export_pdf
@@ -38,6 +40,10 @@ LOG_PATH = APP_DIR / "guideexpress.log"
 
 THUMBNAIL_MAX_SIZE = (220, 150)
 EDITOR_MAX_SIZE = (980, 680)
+# Frequence (en nombre de cartes) a laquelle _build_review_view rend la main
+# a la boucle d'evenements Tk pendant la construction d'une session volumineuse
+# (voir _build_review_view, trouvaille d'audit dimension 9).
+_REVIEW_BUILD_PROGRESS_EVERY = 20
 
 _logging_configured = False
 
@@ -81,6 +87,70 @@ def _resource_path(name: str) -> Path:
     donnees sont alors extraits dans un dossier temporaire sys._MEIPASS)."""
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return base / name
+
+
+_dpi_awareness_configured = False
+
+
+def _configure_dpi_awareness() -> None:
+    """Rend le processus explicitement "Per-Monitor V2 DPI Aware" AVANT toute
+    creation de fenetre Tk (trouvaille d'audit, dimension 7) : sans manifeste
+    ni appel explicite, un executable PyInstaller n'est, par defaut, PAS
+    declare sensible au DPI - Windows le traite alors comme "DPI-unaware" et
+    virtualise ses coordonnees/captures a 96 DPI (100%).
+    Consequence concrete pour ce projet : le hook bas niveau WH_MOUSE_LL de
+    pynput rapporte les clics en pixels PHYSIQUES quelle que soit la
+    sensibilite DPI du processus, alors que _virtual_screen_origin()
+    (recorder.py, via GetSystemMetrics) et ImageGrab.grab() (Pillow/GDI)
+    renvoient des valeurs VIRTUALISEES pour un processus non DPI-aware sur un
+    ecran mis a l'echelle (125%/150%/200%, tres courant sur portables/ecrans
+    modernes) - deux reperes de coordonnees potentiellement differents,
+    pouvant desynchroniser le marqueur de clic stocke de l'image reellement
+    capturee, en plus d'un flou de capture (image virtualisee = reduite).
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4) est disponible depuis
+    Windows 10 1703 ; repli sur les API plus anciennes (Windows 8.1 puis
+    Vista) pour rester fonctionnel sur un systeme plus ancien.
+    Complementaire du manifeste embarque dans l'executable PyInstaller
+    (GuideExpress.manifest, reference par GuideExpress.spec) qui couvre le
+    meme besoin AVANT meme que Python ne demarre - le manifeste est la
+    methode recommandee par Microsoft pour un executable natif ; cet appel
+    ctypes reste un filet de securite actif meme lance depuis le code source
+    (`python gui.py`, sans passer par l'exe empaquete).
+    Idempotent (protege par `_dpi_awareness_configured`, meme motif que
+    `_configure_logging`) : appele une seule fois au niveau module, juste en
+    dessous de cette fonction, des l'import de gui.py - donc avant que
+    __main__ ou un test ne puisse construire la premiere GuideExpressApp()
+    (qui cree la fenetre Tk racine des l'instanciation)."""
+    global _dpi_awareness_configured
+    if _dpi_awareness_configured or sys.platform != "win32":
+        return
+    try:
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2):
+            _dpi_awareness_configured = True
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        PROCESS_PER_MONITOR_DPI_AWARE = 2
+        if ctypes.windll.shcore.SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE) == 0:
+            _dpi_awareness_configured = True
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass  # echec silencieux : au pire, comportement pre-correctif (non DPI-aware) - jamais bloquant pour le reste de l'app
+    _dpi_awareness_configured = True
+
+
+# Applique au moment de l'import du module, avant que __main__ ne construise
+# la premiere GuideExpressApp() (qui cree la fenetre Tk racine des
+# l'instanciation) - un appel APRES la creation de la premiere fenetre Tk
+# n'aurait aucun effet (la sensibilite DPI d'un processus Windows ne peut
+# etre definie qu'une seule fois, avant toute fenetre).
+_configure_dpi_awareness()
 
 
 class GuideExpressApp(tk.Tk):
@@ -307,7 +377,17 @@ class GuideExpressApp(tk.Tk):
         rouvrir la session plus tard - sans ca, fermer l'application apres
         un enregistrement perdait tout le travail de relecture (descriptions,
         redactions, ordre, zoom), seules les captures brutes survivant sur
-        le disque, inutilisables telles quelles."""
+        le disque, inutilisables telles quelles.
+
+        Ecriture atomique (fichier temporaire + os.replace) : sans ca, un
+        crash/coupure de courant exactement pendant l'ecriture laissait
+        session.json tronque / JSON invalide (trouvaille d'audit). Cette
+        methode est appelee tres frequemment (a chaque deplacement,
+        suppression, edition...) donc la fenetre d'exposition a une
+        ecriture interrompue est sollicitee de nombreuses fois par session -
+        os.replace() est atomique sur NTFS pour un remplacement dans le meme
+        volume, donc soit l'ancien session.json survit intact, soit le
+        nouveau est ecrit en entier, jamais un etat intermediaire corrompu."""
         if self.session_dir is None:
             return
         meta = {
@@ -316,9 +396,12 @@ class GuideExpressApp(tk.Tk):
         }
         try:
             self.session_dir.mkdir(parents=True, exist_ok=True)
-            (self.session_dir / SESSION_META_FILENAME).write_text(
+            final_path = self.session_dir / SESSION_META_FILENAME
+            tmp_path = self.session_dir / f"{SESSION_META_FILENAME}.tmp"
+            tmp_path.write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8",
             )
+            os.replace(tmp_path, final_path)
         except OSError:
             pass  # une sauvegarde de metadonnees ratee ne doit jamais interrompre l'edition en cours
 
@@ -547,6 +630,20 @@ class GuideExpressApp(tk.Tk):
         ttk.Label(
             frame, text="Clic gauche ou droit = une etape", foreground="#666", font=("Segoe UI", 8),
         ).pack(pady=(0, 6))
+        # Avertissement UIPI/elevation (trouvaille d'audit, dimension 6) :
+        # masque par defaut (pack() n'est appele que par
+        # _update_elevated_window_warning quand une fenetre elevee est
+        # detectee au premier plan), sur le meme motif pack()/pack_forget()
+        # que error_label dans _build_step_row.
+        self.hud_elevated_warning_label = ttk.Label(
+            frame,
+            text=(
+                "Attention : fenetre administrateur au premier plan -\n"
+                "les clics ici ne seront PAS captures (limite Windows)"
+            ),
+            foreground="#b35900", font=("Segoe UI", 8, "bold"),
+            justify="center", wraplength=230,
+        )
         self.hud_pause_button = ttk.Button(frame, text="Pause", command=self._toggle_pause_recording)
         self.hud_pause_button.pack(pady=(0, 6))
         ttk.Button(frame, text="Arreter l'enregistrement", command=self._stop_recording).pack()
@@ -572,10 +669,51 @@ class GuideExpressApp(tk.Tk):
             return
         drained = self._drain_events()
         self._drain_capture_errors()
-        if drained and self.hud is not None:
-            self.hud_count_var.set(f"{len(self.steps)} etape(s) capturee(s)")
+        if drained:
+            if self.hud is not None:
+                self.hud_count_var.set(f"{len(self.steps)} etape(s) capturee(s)")
+            # Sauvegarde incrementale pendant l'enregistrement actif : avant
+            # ce correctif, session.json n'etait ecrit qu'a l'arret
+            # (_stop_recording -> _build_review_view). Un crash/coupure de
+            # courant pendant l'enregistrement (avant le premier arret)
+            # laissait alors les captures brutes (step_XXXX_raw.png) sur le
+            # disque sans AUCUN fichier pour les referencer - ordre,
+            # positions de clic et titres de fenetre etaient perdus, seules
+            # des images anonymes survivaient (trouvaille d'audit). On
+            # persiste maintenant l'etat courant de self.steps a chaque lot
+            # d'evenements draine (toutes les ~150 ms au plus, seulement
+            # quand il y a du nouveau), au meme rythme que la mise a jour du
+            # compteur du HUD - cout marginal faible (JSON de quelques Ko,
+            # ecriture atomique via _save_session_meta) sur le thread
+            # principal Tk via after(), donc sans bloquer le hook souris.
+            self._save_session_meta()
+        self._update_elevated_window_warning()
         if self.recorder.is_active:
             self.after(150, self._poll_events)
+
+    def _update_elevated_window_warning(self):
+        """Avertit explicitement l'utilisateur quand la fenetre au premier
+        plan est executee a un niveau d'integrite superieur a GuideExpress
+        (UAC/administrateur) : dans ce cas, l'UIPI de Windows empeche le hook
+        bas niveau de recevoir les clics qui y seront faits, silencieusement
+        - aucune exception, aucun evenement, rien a attraper cote Python
+        (trouvaille d'audit, dimension 6). Comme il n'existe structurellement
+        aucun moyen de detecter APRES coup un clic qui n'a jamais atteint
+        l'application, la seule detection possible est PROACTIVE : verifier
+        a chaque cycle de sondage (150 ms, meme frequence que le reste de
+        _poll_events) si la fenetre active est elevee, pour prevenir
+        l'utilisateur avant qu'il ne clique dedans en pensant que ses actions
+        sont enregistrees, plutot que le laisser decouvrir plus tard une
+        etape manquante en relisant son guide."""
+        if self.hud is None or not hasattr(self, "hud_elevated_warning_label"):
+            return
+        elevated = foreground_window_is_elevated()
+        label = self.hud_elevated_warning_label
+        currently_shown = label.winfo_manager() != ""
+        if elevated and not currently_shown:
+            label.pack(pady=(0, 6), before=self.hud_pause_button)
+        elif not elevated and currently_shown:
+            label.pack_forget()
 
     def _drain_events(self) -> bool:
         if self.recorder is None:
@@ -711,8 +849,33 @@ class GuideExpressApp(tk.Tk):
             ttk.Label(inner, text="Aucune etape capturee (aucun clic detecte pendant l'enregistrement).").pack(pady=20)
 
         self._drag_uid = None
-        for step in self.steps:
-            self._build_step_row(inner, step)
+        # Reactivite pendant la construction (trouvaille d'audit, dimension
+        # 9) : mesure empirique sur une session de 300 etapes, une seule
+        # image brute partagee pour isoler le cout de construction ->
+        # 10.1s de gel TOTAL de l'interface (aucune pompe de messages
+        # Windows pendant ce temps, puisque toute la boucle s'execute sur le
+        # thread principal Tk sans rendre la main). Au-dela d'environ 5s
+        # sans reponse, Windows marque typiquement une fenetre comme "Ne
+        # repond pas" - risquant un "forcage de fermeture" par reflexe de
+        # l'utilisateur (sans perte de donnees reelle, session.json est deja
+        # sauvegarde plus haut, mais mauvaise experience et reouverture tout
+        # aussi lente). Le curseur sablier donne un signal immediat que
+        # l'application travaille encore, et update_idletasks() appele
+        # toutes les _REVIEW_BUILD_PROGRESS_EVERY cartes rend regulierement
+        # la main a la boucle d'evenements Windows - assez souvent pour
+        # eviter la detection "Ne repond pas", sans pour autant payer le
+        # cout d'un rafraichissement complet a CHAQUE carte (un
+        # update_idletasks() par carte ralentirait sensiblement la
+        # construction elle-meme sur une tres grosse session).
+        try:
+            self.configure(cursor="watch")
+            self.update_idletasks()
+            for i, step in enumerate(self.steps, start=1):
+                self._build_step_row(inner, step)
+                if i % _REVIEW_BUILD_PROGRESS_EVERY == 0:
+                    self.update_idletasks()
+        finally:
+            self.configure(cursor="")
 
         bottom = ttk.Frame(self._container, padding=10)
         bottom.pack(fill="x")
