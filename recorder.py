@@ -19,7 +19,7 @@ from pathlib import Path
 from PIL import ImageGrab
 from pynput import mouse
 
-from capture import get_window_at_point, get_window_title_at_point
+from capture import get_window_at_point, get_window_text
 
 
 def _grab_screenshot():
@@ -79,9 +79,20 @@ class Recorder:
     hook systeme bas-niveau de la souris. Windows impose un delai maximum de
     reponse a ce genre de callback ; y faire de l'encodage PNG et de
     l'ecriture disque directement risquerait de perdre des clics (voire de
-    faire desactiver le hook par l'OS sur une machine lente). Seuls ces deux
-    travaux lents (encodage PNG, ecriture disque) sont donc deportes vers le
-    thread d'ecriture separe (_writer_loop), via _save_queue.
+    faire desactiver le hook par l'OS sur une machine lente). Seuls ces
+    travaux lents sont donc deportes vers le thread d'ecriture separe
+    (_writer_loop), via _save_queue : l'encodage PNG et l'ecriture disque,
+    mais aussi la resolution du TEXTE du titre de la fenetre ciblee
+    (get_window_text, capture.py) - GetWindowTextW envoie en interne un
+    message WM_GETTEXT bloquant et attend la reponse de la fenetre ciblee,
+    ce qui porte exactement le meme risque de timeout/desinstallation
+    silencieuse du hook que l'ecriture disque, via un mecanisme different
+    (message inter-processus bloquant, pas de la lenteur disque) - bug
+    trouve a l'audit, dimension 2. Seul le HWND (recuperation quasi
+    instantanee via WindowFromPoint, deja necessaire pour la verification
+    des fenetres exclues) est capture de facon synchrone dans le callback ;
+    le TEXTE du titre n'est resolu qu'au moment ou le thread d'ecriture
+    traite l'element correspondant.
 
     La capture d'ecran elle-meme (ImageGrab.grab, voir _grab_screenshot)
     reste en revanche appelee de facon SYNCHRONE, directement dans le
@@ -181,11 +192,20 @@ class Recorder:
         # Ne reagit qu'au clic gauche, uniquement a l'enfoncement (pas au
         # relachement, pour eviter un doublon par clic). Reste volontairement
         # tres court : la capture elle-meme (rapide) est faite ici, mais tout
-        # le travail lent (encodage, ecriture disque) est delegue.
+        # le travail lent (encodage, ecriture disque, resolution du TEXTE du
+        # titre de fenetre - voir get_window_at_point vs get_window_text ci-
+        # dessous) est delegue au thread d'ecriture.
         if not self._active or self._paused or button not in (mouse.Button.left, mouse.Button.right) or not pressed:
             return
         try:
-            if self.excluded_hwnds and get_window_at_point(x, y) in self.excluded_hwnds:
+            # get_window_at_point (WindowFromPoint) est rapide et ne bloque
+            # jamais sur un processus tiers : contrairement a get_window_text
+            # (GetWindowTextW, voir capture.py), il n'envoie aucun message
+            # inter-processus a la fenetre ciblee. Seul ce HWND est capture
+            # ici ; la resolution du TEXTE du titre est deportee vers
+            # _writer_loop (bug trouve a l'audit, dimension 2).
+            hwnd = get_window_at_point(x, y)
+            if self.excluded_hwnds and hwnd in self.excluded_hwnds:
                 return  # clic sur notre propre fenetre (ex: bouton Arreter) : ignore
             self._counter += 1
             idx = self._counter
@@ -211,7 +231,7 @@ class Recorder:
             "click_x": x - origin_x,
             "click_y": y - origin_y,
             "button": "left" if button == mouse.Button.left else "right",
-            "window_title": get_window_title_at_point(x, y),
+            "window_hwnd": hwnd,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         })
 
@@ -225,13 +245,24 @@ class Recorder:
             raw_path = self.session_dir / f"step_{idx:04d}_raw.png"
             try:
                 item["image"].save(raw_path)
+                # Resolution du TEXTE du titre de fenetre deportee ici (voir
+                # le commentaire de _on_click et celui de la classe) :
+                # GetWindowTextW peut bloquer plusieurs secondes si la
+                # fenetre ciblee est non reactive - sans consequence dans ce
+                # thread d'ecriture separe, contrairement au callback du hook
+                # bas niveau ou un tel blocage risquait de faire desinstaller
+                # le hook par Windows apres 300 ms (bug trouve a l'audit,
+                # dimension 2). get_window_text degrade deja proprement en
+                # chaine vide en interne (voir capture._get_window_text) :
+                # aucune exception attendue ici en usage normal.
+                window_title = get_window_text(item["window_hwnd"])
                 self.events.put({
                     "index": idx,
                     "raw_image_path": raw_path,
                     "click_x": item["click_x"],
                     "click_y": item["click_y"],
                     "button": item["button"],
-                    "window_title": item["window_title"],
+                    "window_title": window_title,
                     "timestamp": item["timestamp"],
                 })
             except Exception as exc:  # noqa: BLE001 - une etape en echec ne doit

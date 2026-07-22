@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
 import queue
 import shutil
@@ -11,10 +12,11 @@ import sys
 import time
 import tkinter as tk
 import webbrowser
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from tkinter import ttk, messagebox, filedialog, simpledialog
 
-from PIL import ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 DONATE_URL = "https://ko-fi.com/yoshines62000"
 APP_VERSION = "1.1.11"
@@ -32,9 +34,45 @@ from export import export_html, export_markdown, export_pdf
 APP_DIR = Path.home() / ".guide_express"
 SESSIONS_DIR = APP_DIR / "sessions"
 SESSION_META_FILENAME = "session.json"
+LOG_PATH = APP_DIR / "guideexpress.log"
 
 THUMBNAIL_MAX_SIZE = (220, 150)
 EDITOR_MAX_SIZE = (980, 680)
+
+_logging_configured = False
+
+
+def _configure_logging() -> None:
+    """Journalisation minimale et locale (cohérente avec l'engagement "100%
+    local, zéro télémétrie" du projet) : sans elle, aucune des pannes
+    silencieuses possibles (image brute corrompue, exception inattendue
+    absorbée par Tkinter...) n'était diagnosticable, ni par l'utilisateur ni
+    par le développeur solo qui doit supporter cette application sans
+    télémétrie - l'exécutable est empaqueté sans console
+    (GuideExpress.spec, console=False), donc stderr n'existe nulle part pour
+    un utilisateur final (trouvaille d'audit : recherche exhaustive de
+    `logging`/`traceback`/`print` sur tout le dépôt, aucune occurrence).
+    RotatingFileHandler limité à 1 Mo : un utilisateur qui laisse
+    GuideExpress installé des mois ne doit jamais voir son dossier de
+    données grossir indéfiniment à cause du seul fichier de log.
+    Idempotent (protégé par `_logging_configured`) : plusieurs instances de
+    GuideExpressApp (ex: tests) ne doivent pas empiler des handlers en
+    double sur le logger racine."""
+    global _logging_configured
+    if _logging_configured:
+        return
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=1, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.WARNING)
+        root_logger.addHandler(handler)
+    except OSError:
+        pass  # dossier de donnees inaccessible en ecriture (permissions,
+        # disque plein...) : l'absence de journalisation ne doit jamais
+        # rendre l'application elle-meme inutilisable.
+    _logging_configured = True
 
 
 def _resource_path(name: str) -> Path:
@@ -47,6 +85,7 @@ def _resource_path(name: str) -> Path:
 
 class GuideExpressApp(tk.Tk):
     def __init__(self):
+        _configure_logging()
         super().__init__()
         self.title("GuideExpress - Guides pas-a-pas")
         # 900x560 (au lieu de 760x560) : a 760px, meme repartis sur deux
@@ -82,6 +121,20 @@ class GuideExpressApp(tk.Tk):
         # RENDU d'une etape change reellement (redaction, reprise, zoom) -
         # jamais pour un simple reordonnancement, qui ne touche aucune image.
         self._thumbnail_cache: dict = {}
+        # uid des etapes dont l'image brute est illisible/corrompue (fichier
+        # 0 octet, tronque, supprime a la main...) : render_step_image a leve
+        # (OSError, ValueError) pour ces etapes-la. Sans ce suivi, la SEULE
+        # information disponible pour l'utilisateur aurait ete une vignette
+        # de remplacement generique, sans lien avec les autres indicateurs
+        # (label "Image introuvable" sur la carte, avertissement agrege en
+        # fin de construction de l'ecran de relecture) - voir _get_thumbnail
+        # et _build_review_view (bug trouve a l'audit : UnidentifiedImageError
+        # non geree interrompait toute la construction de la liste).
+        self._thumbnail_error_uids: set = set()
+        # Vignette de remplacement (grise, croix rouge) partagee par toutes
+        # les cartes en erreur - generee une seule fois a la demande (voir
+        # _get_error_thumbnail), son contenu ne depend jamais de l'etape.
+        self._error_thumbnail_photo = None
         # Widgets de chaque carte d'etape, indexes par step.uid : permet de
         # reordonner/mettre a jour une carte existante sans la detruire et la
         # reconstruire (donc sans jamais rappeler render_step_image) pour les
@@ -106,6 +159,30 @@ class GuideExpressApp(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_start_view()
+
+    def report_callback_exception(self, exc, val, tb):
+        """Tkinter appelle cette methode (jamais sys.excepthook) pour toute
+        exception qui s'echappe d'un callback lie a la boucle d'evenements
+        (clic sur un bouton, evenement <FocusOut>, rappel programme via
+        after()...). Le comportement par defaut se contente d'ecrire la
+        traceback sur stderr - invisible pour l'executable empaquete en mode
+        fenetre (console=False, GuideExpress.spec:32), donc totalement
+        silencieux pour l'utilisateur final (trouvaille d'audit, dimension 5).
+        On journalise la traceback complete dans le fichier de log local ET
+        on affiche un message clair, plutot que de laisser l'exception
+        disparaitre sans aucune trace exploitable ni le moindre indice pour
+        l'utilisateur qu'un probleme vient de se produire."""
+        logging.getLogger(__name__).error(
+            "Exception non geree dans un callback Tk", exc_info=(exc, val, tb),
+        )
+        try:
+            messagebox.showerror(
+                "Erreur inattendue",
+                "Une erreur inattendue est survenue.\n\n"
+                f"Details enregistres dans le journal :\n{LOG_PATH}",
+            )
+        except tk.TclError:
+            pass  # Tk lui-meme dans un etat instable : ne pas aggraver la situation
 
     def _poll_update_check(self):
         try:
@@ -290,6 +367,7 @@ class GuideExpressApp(tk.Tk):
         self.title_var.set(meta.get("title", "Mon guide"))
         self.steps = steps
         self._thumbnail_cache = {}  # session rouverte : rien a reutiliser d'une session precedente
+        self._thumbnail_error_uids = set()
         self._build_review_view()
         if missing:
             messagebox.showwarning(
@@ -405,6 +483,7 @@ class GuideExpressApp(tk.Tk):
         self.session_dir = session_dir
         self.steps = []
         self._thumbnail_cache = {}  # nouvelle session : rien a reutiliser de la precedente
+        self._thumbnail_error_uids = set()
 
         self.withdraw()
         self._open_hud()
@@ -597,7 +676,31 @@ class GuideExpressApp(tk.Tk):
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
         inner = ttk.Frame(canvas)
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner_window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        # Sans cette ligne, "inner" (et donc chaque carte d'etape qu'il
+        # contient) auto-dimensionne sa PROPRE largeur a la somme des
+        # demandes naturelles de tous ses widgets (poignee + miniature +
+        # zone de texte + boutons), completement independamment de la
+        # largeur reellement visible du canvas - seul un defilement VERTICAL
+        # existe, rien ne compense jamais cet exces horizontal. Consequence
+        # verifiee empiriquement (bug trouve a l'audit, dimension 8) : meme
+        # apres avoir reordonne l'empaquetage des boutons dans
+        # _build_step_row (les boutons empaquetes avant la zone de texte),
+        # "inner" restait plus large que la fenetre, et "Rediger"/"Supprimer"
+        # continuaient d'etre positionnes au-dela du bord droit reel de la
+        # fenetre, invisibles et inaccessibles, a la taille minimale
+        # declaree (self.minsize). En liant la largeur de l'item canvas a la
+        # largeur REELLE du canvas a chaque redimensionnement, "inner" (et
+        # donc chaque carte, via son propre fill="x") est desormais contraint
+        # a ne jamais depasser la largeur visible : c'est alors la zone de
+        # texte (seul widget avec fill+expand, empaquete en dernier dans
+        # _build_step_row) qui absorbe le manque de place en retrecissant,
+        # jamais les boutons d'action, qui reservent toujours leur taille
+        # minimale requise en priorite.
+        def _sync_inner_width(event, canvas=canvas, window_id=inner_window_id):
+            canvas.itemconfig(window_id, width=event.width)
+
+        canvas.bind("<Configure>", _sync_inner_width)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -624,21 +727,85 @@ class GuideExpressApp(tk.Tk):
         pdf_btn.pack(side="left", padx=6)
         self._export_buttons = [html_btn, md_btn, pdf_btn]
 
+        # Agrege TOUTES les etapes en erreur (image brute illisible/corrompue,
+        # voir _get_thumbnail) en un seul avertissement, affiche une fois la
+        # vue entierement construite (barre du bas comprise) - jamais un
+        # messagebox par etape, qui obligerait l'utilisateur a fermer une
+        # rafale de boites de dialogue avant de pouvoir seulement voir son
+        # ecran de relecture. Meme modele que l'avertissement deja existant
+        # pour les fichiers manquants dans _reopen_session.
+        error_count = sum(1 for step in self.steps if step.uid in self._thumbnail_error_uids)
+        if error_count:
+            messagebox.showwarning(
+                "Images illisibles",
+                f"{error_count} etape(s) ont une image brute illisible ou corrompue "
+                "(fichier vide, endommage, ou verrouille par un antivirus) et "
+                "s'affichent avec une vignette de remplacement, reperable a la "
+                "mention \"Image introuvable ou corrompue\" sur leur carte.\n\n"
+                "Utilisez le bouton \"Reprendre\" pour recapturer l'etape "
+                "concernee, ou \"Supprimer\" pour la retirer du guide.",
+            )
+
+    def _get_error_thumbnail(self):
+        """Vignette de remplacement (fond gris, croix rouge) affichee a la
+        place de la miniature d'une etape dont l'image brute est illisible ou
+        corrompue - generee une seule fois puis partagee entre toutes les
+        cartes en erreur (son contenu ne depend jamais de l'etape)."""
+        if self._error_thumbnail_photo is None:
+            w, h = THUMBNAIL_MAX_SIZE
+            img = Image.new("RGB", (w, h), color=(90, 90, 90))
+            draw = ImageDraw.Draw(img)
+            margin = min(w, h) // 5
+            draw.line([(margin, margin), (w - margin, h - margin)], fill=(220, 60, 60), width=4)
+            draw.line([(w - margin, margin), (margin, h - margin)], fill=(220, 60, 60), width=4)
+            self._error_thumbnail_photo = ImageTk.PhotoImage(img)
+        return self._error_thumbnail_photo
+
     def _get_thumbnail(self, step):
         """Renvoie la miniature (PhotoImage) deja rendue pour cette etape si
         elle est en cache, sinon la (re)genere depuis le disque et la met en
         cache. Le cache est indexe par step.uid, invalide explicitement par
         les gestionnaires d'evenements des qu'une mutation change reellement
         le RENDU de l'etape (redaction, reprise, zoom) - jamais pour un
-        simple reordonnancement."""
+        simple reordonnancement.
+
+        Si l'image brute est illisible ou corrompue (fichier 0 octet,
+        tronque, verrou antivirus, disque plein ayant interrompu l'ecriture),
+        render_step_image leve (OSError, ValueError, y compris
+        PIL.UnidentifiedImageError qui herite de OSError) - AVANT ce
+        correctif, cette exception remontait non geree jusqu'a la boucle de
+        construction de _build_review_view, l'interrompant en plein milieu
+        et laissant un ecran a moitie construit, sans bouton d'export ni
+        moyen de revenir en arriere (bug trouve a l'audit, dimension 1).
+        Cette etape-la ne doit jamais empecher l'affichage des autres."""
         cached = self._thumbnail_cache.get(step.uid)
         if cached is not None:
             return cached
-        img = render_step_image(step, zoom=step.zoom)
+        try:
+            img = render_step_image(step, zoom=step.zoom)
+        except (OSError, ValueError):
+            logging.getLogger(__name__).warning(
+                "Image brute illisible pour l'etape %s (%s)",
+                step.index, step.raw_image_path, exc_info=True,
+            )
+            self._thumbnail_error_uids.add(step.uid)
+            photo = self._get_error_thumbnail()
+            self._thumbnail_cache[step.uid] = photo
+            return photo
+        self._thumbnail_error_uids.discard(step.uid)
         img.thumbnail(THUMBNAIL_MAX_SIZE)
         photo = ImageTk.PhotoImage(img)
         self._thumbnail_cache[step.uid] = photo
         return photo
+
+    def _invalidate_thumbnail(self, step):
+        """Invalide le cache de miniature ET le marqueur d'erreur associe
+        d'UNE etape - a appeler des que le RENDU de cette etape change
+        reellement (reprise, redaction, zoom, suppression). Regroupe les deux
+        pour eviter qu'une etape corrigee par une reprise/redaction ne reste
+        marquee en erreur indefiniment (ou inversement)."""
+        self._thumbnail_cache.pop(step.uid, None)
+        self._thumbnail_error_uids.discard(step.uid)
 
     def _refresh_row_image(self, step):
         """Recalcule uniquement la miniature d'UNE etape (dont le cache a
@@ -650,6 +817,12 @@ class GuideExpressApp(tk.Tk):
         photo = self._get_thumbnail(step)
         row_info["img_label"].configure(image=photo)
         row_info["img_label"].image = photo
+        error_label = row_info.get("error_label")
+        if error_label is not None:
+            if step.uid in self._thumbnail_error_uids:
+                error_label.pack(anchor="w")
+            else:
+                error_label.pack_forget()
 
     def _update_step_count_and_buttons(self):
         if hasattr(self, "_step_count_var"):
@@ -689,7 +862,7 @@ class GuideExpressApp(tk.Tk):
         row_info = self._rows.pop(step.uid, None)
         if row_info is not None:
             row_info["frame"].destroy()
-        self._thumbnail_cache.pop(step.uid, None)
+        self._invalidate_thumbnail(step)
 
     def _insert_row_after(self, step, after_step):
         after_frame = self._rows[after_step.uid]["frame"] if after_step is not None else None
@@ -712,10 +885,52 @@ class GuideExpressApp(tk.Tk):
         img_label.image = photo
         img_label.pack(side="left", padx=(0, 10))
 
+        # Les boutons d'action sont empaquetes AVANT le bloc de texte "mid"
+        # (contrairement a l'ordre precedent : texte d'abord, boutons
+        # ensuite). Sous le gestionnaire pack de Tk, c'est l'ORDRE
+        # D'EMPAQUETAGE - pas le side="left"/"right" - qui determine quel
+        # widget reclame sa part de la cavite disponible en premier. Avec le
+        # texte empaquete en premier (ancien ordre) et expand=True, "mid"
+        # reclamait tout l'espace restant AVANT que les boutons n'aient pu
+        # reserver le leur : en dessous d'un certain seuil de largeur de
+        # fenetre (atteint bien avant self.minsize), "Rediger" et "Supprimer"
+        # se retrouvaient coupes hors champ, caches sous la barre de
+        # defilement verticale, sans aucune barre de defilement horizontale
+        # pour les atteindre (bug trouve a l'audit : regression partielle du
+        # fix du commit 387c5b4, qui avait bien reparti les boutons sur deux
+        # rangees mais sans corriger cet ordre d'empaquetage). En empaquetant
+        # les boutons D'ABORD, ils reservent toujours leur taille minimale
+        # requise en priorite ; c'est desormais le champ de texte (qui peut
+        # legitimement retrecir sans perdre de fonctionnalite) qui absorbe le
+        # manque de place, jamais les boutons d'action.
+        btns = ttk.Frame(row)
+        btns.pack(side="right")
+        btns_row1 = ttk.Frame(btns)
+        btns_row1.pack(anchor="e")
+        btns_row2 = ttk.Frame(btns)
+        btns_row2.pack(anchor="e", pady=(4, 0))
+        ttk.Button(btns_row1, text="Haut", width=6, command=lambda s=step: self._move(s, -1)).pack(side="left", padx=2)
+        ttk.Button(btns_row1, text="Bas", width=6, command=lambda s=step: self._move(s, +1)).pack(side="left", padx=2)
+        ttk.Button(btns_row1, text="Rediger", width=8, command=lambda s=step: self._open_redaction_editor(s)).pack(side="left", padx=2)
+        ttk.Button(btns_row2, text="Reprendre", width=9, command=lambda s=step: self._retake_step(s)).pack(side="left", padx=2)
+        ttk.Button(btns_row2, text="Dupliquer", width=9, command=lambda s=step: self._duplicate(s)).pack(side="left", padx=2)
+        ttk.Button(btns_row2, text="Supprimer", width=9, command=lambda s=step: self._delete(s)).pack(side="left", padx=2)
+
         mid = ttk.Frame(row)
         mid.pack(side="left", fill="both", expand=True)
         index_var = tk.StringVar(value=f"Etape {step.index}")
         ttk.Label(mid, textvariable=index_var, font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        # Indicateur visible uniquement si l'image brute de cette etape est
+        # illisible/corrompue (voir _get_thumbnail) - jamais bloquant, juste
+        # une alerte qui oriente l'utilisateur vers "Reprendre" ou
+        # "Supprimer" plutot que de le laisser deviner pourquoi la vignette
+        # est grise (bug trouve a l'audit, dimension 1).
+        error_label = ttk.Label(
+            mid, text="Image introuvable ou corrompue",
+            foreground="#c0392b", font=("Segoe UI", 8, "bold"),
+        )
+        if step.uid in self._thumbnail_error_uids:
+            error_label.pack(anchor="w")
         desc_var = tk.StringVar(value=step.description)
         entry = ttk.Entry(mid, textvariable=desc_var, width=50)
         entry.pack(anchor="w", fill="x", pady=(2, 0))
@@ -739,26 +954,9 @@ class GuideExpressApp(tk.Tk):
         )
         zoom_check.pack(anchor="w", pady=(4, 0))
 
-        # Les 6 boutons d'action sont repartis sur deux rangees (au lieu
-        # d'une seule rangee de 6) pour rester visibles meme dans une
-        # fenetre de taille par defaut ou reduite : une seule rangee de 6
-        # boutons largeur fixe depassait la largeur de la carte et n'etait
-        # accessible qu'en agrandissant manuellement la fenetre, sans
-        # aucune barre de defilement horizontale ni indice visuel.
-        btns = ttk.Frame(row)
-        btns.pack(side="right")
-        btns_row1 = ttk.Frame(btns)
-        btns_row1.pack(anchor="e")
-        btns_row2 = ttk.Frame(btns)
-        btns_row2.pack(anchor="e", pady=(4, 0))
-        ttk.Button(btns_row1, text="Haut", width=6, command=lambda s=step: self._move(s, -1)).pack(side="left", padx=2)
-        ttk.Button(btns_row1, text="Bas", width=6, command=lambda s=step: self._move(s, +1)).pack(side="left", padx=2)
-        ttk.Button(btns_row1, text="Rediger", width=8, command=lambda s=step: self._open_redaction_editor(s)).pack(side="left", padx=2)
-        ttk.Button(btns_row2, text="Reprendre", width=9, command=lambda s=step: self._retake_step(s)).pack(side="left", padx=2)
-        ttk.Button(btns_row2, text="Dupliquer", width=9, command=lambda s=step: self._duplicate(s)).pack(side="left", padx=2)
-        ttk.Button(btns_row2, text="Supprimer", width=9, command=lambda s=step: self._delete(s)).pack(side="left", padx=2)
-
-        self._rows[step.uid] = {"frame": row, "index_var": index_var, "img_label": img_label}
+        self._rows[step.uid] = {
+            "frame": row, "index_var": index_var, "img_label": img_label, "error_label": error_label,
+        }
         return row
 
     def _toggle_zoom(self, step, zoom_var):
@@ -766,7 +964,7 @@ class GuideExpressApp(tk.Tk):
         # Seule l'image de CETTE etape change (cadrage zoome ou non) : on
         # invalide uniquement son entree de cache et on ne re-rend que sa
         # carte, au lieu de reconstruire toute la vue de relecture.
-        self._thumbnail_cache.pop(step.uid, None)
+        self._invalidate_thumbnail(step)
         self._save_session_meta()
         self._refresh_row_image(step)
 
@@ -934,7 +1132,7 @@ class GuideExpressApp(tk.Tk):
         # Seule l'image de CETTE etape a change (nouvelle capture) : sa
         # position dans la liste, son index affiche et toutes les autres
         # cartes restent inchanges, inutile de reconstruire toute la vue.
-        self._thumbnail_cache.pop(step.uid, None)
+        self._invalidate_thumbnail(step)
         self._save_session_meta()
         self._refresh_row_image(step)
 
@@ -1097,7 +1295,7 @@ class GuideExpressApp(tk.Tk):
         # Seule l'image de CETTE etape a change (redactions ajoutees ou
         # retirees dans l'editeur) : pas besoin de reconstruire toute la vue
         # de relecture, juste d'invalider son cache et de re-rendre sa carte.
-        self._thumbnail_cache.pop(step.uid, None)
+        self._invalidate_thumbnail(step)
         self._save_session_meta()
         self._refresh_row_image(step)
 

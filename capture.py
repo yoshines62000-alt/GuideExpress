@@ -134,6 +134,24 @@ def get_window_title_at_point(x: int, y: int) -> str:
     return _get_window_text(hwnd) if hwnd else ""
 
 
+def get_window_text(hwnd) -> str:
+    """Titre d'une fenetre a partir d'un HWND deja connu (obtenu au moment
+    du clic via get_window_at_point, rapide et non bloquant). Wrapper public
+    de _get_window_text : utilise pour resoudre le TEXTE du titre plus tard
+    (voir recorder.Recorder._writer_loop), jamais dans le callback du hook
+    bas niveau lui-meme. GetWindowTextW envoie en interne un message
+    WM_GETTEXT a la fenetre ciblee et ATTEND sa reponse - si cette fenetre
+    appartient a une application non reactive (gelee, en attente reseau...),
+    l'appel peut bloquer plusieurs secondes. Windows impose un delai de
+    reponse maximal aux hooks bas niveau (LowLevelHooksTimeout, 300 ms par
+    defaut) : au-dela, l'OS desinstalle le hook SILENCIEUSEMENT, sans lever
+    d'exception cote Python (bug trouve a l'audit, dimension 2). Appeler
+    cette fonction depuis un thread separe (jamais depuis le callback du
+    hook) elimine ce risque : un GetWindowTextW lent y est sans consequence
+    pour la capture des clics suivants."""
+    return _get_window_text(hwnd)
+
+
 def render_step_image(step: Step, zoom: bool = False) -> Image.Image:
     """Construit l'image finale d'une etape (marqueur de clic + redactions applique)
     a partir de l'image brute, SANS jamais modifier le fichier source sur le disque.
