@@ -187,7 +187,13 @@ non-destruction de l'image source, rédaction, réordonnancement, échappement
 HTML/Markdown à l'export) et un scénario de bout en bout avec un vrai clic
 système.
 
+Les tests de l'export PDF nécessitent une dépendance supplémentaire
+([`pypdf`](https://pypdf.readthedocs.io/), pour relire et vérifier le PDF
+généré), non requise pour l'application elle-même : installez
+`requirements-dev.txt` avant de lancer la suite.
+
 ```bash
+python -m pip install -r requirements-dev.txt
 python -m unittest discover tests -v
 ```
 
@@ -199,7 +205,8 @@ recorder.py          # ecoute des clics (pynput) et capture d'ecran, isole du re
 export.py            # export HTML autonome / Markdown
 gui.py                # interface graphique Tkinter
 tests/                # tests automatises
-requirements.txt      # dependances (Pillow, pynput)
+requirements.txt      # dependances de l'application (Pillow, pynput)
+requirements-dev.txt   # dependances additionnelles pour lancer les tests (pypdf)
 Lancer.vbs            # raccourci de lancement double-clic (sans console)
 Lancer.bat            # raccourci de lancement double-clic (avec console, pour debug)
 GuideExpress.spec     # configuration de build PyInstaller (.exe autonome)
