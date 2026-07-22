@@ -35,6 +35,15 @@ Dimensions de l'audit du 2026-07-22 verrouillees ici :
 - dimension 10 (Majeure, couverture de tests) : ce fichier lui-meme est la
   reponse a cette dimension - inclut notamment le test d'aller-retour complet
   _save_session_meta()/_reopen_session() suggere par le correctif propose.
+
+Dimensions du Backlog de l'audit du 2026-07-22 traitees ici (passe suivante) :
+- dimension 24 (Mineure) : _create_and_start_recorder factorise la creation +
+  demarrage protege d'un Recorder, commun a _start_recording et _retake_step.
+- dimension 26 (Mineure) : la touche Echap doit fermer l'editeur de redaction.
+- dimension 28 (Mineure) : l'editeur de redaction doit etre verrouille en
+  taille (resizable(False, False)), coherent avec le HUD.
+- dimension 32 (Mineure) : un bandeau "Annuler" temporaire doit permettre de
+  restaurer une etape supprimee par erreur, a sa position d'origine.
 """
 
 import json
@@ -539,6 +548,239 @@ class DpiAwarenessTestCase(unittest.TestCase):
         per_monitor_v2 = ctypes.c_void_p(-4)
         is_pm_v2 = bool(user32.AreDpiAwarenessContextsEqual(current_context, per_monitor_v2))
         self.assertTrue(is_pm_v2, "le processus devrait etre Per-Monitor V2 DPI Aware apres _configure_dpi_awareness()")
+
+
+@unittest.skipUnless(_TK_AVAILABLE, "Aucun affichage Tk disponible dans cet environnement.")
+class CreateAndStartRecorderTestCase(_RealAppTestCase):
+    """Dimension 24 de l'audit (Backlog) : _create_and_start_recorder
+    factorise la logique jusqu'ici dupliquee entre _start_recording et
+    _retake_step (calcul d'exclusion du HUD + creation/demarrage protege du
+    Recorder). Verifie ici les deux chemins (succes / echec) independamment
+    de la vraie installation d'un hook souris bas niveau (Recorder mocke)."""
+
+    class _FakeRecorder:
+        def __init__(self, target_dir, excluded_hwnds=None):
+            self.target_dir = target_dir
+            self.excluded_hwnds = excluded_hwnds
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+    class _FailingRecorder:
+        def __init__(self, target_dir, excluded_hwnds=None):
+            pass
+
+        def start(self):
+            raise OSError("permission refusee (simulee)")
+
+    def test_returns_a_started_recorder_on_success(self):
+        self.app._open_hud()
+        self.addCleanup(lambda: self.app.hud.destroy() if self.app.hud is not None else None)
+        target_dir = self.tmp / "sessions" / "20260101-160000"
+
+        with mock.patch.object(gui_mod, "Recorder", self._FakeRecorder):
+            recorder = self.app._create_and_start_recorder(
+                target_dir, error_title="Titre", error_intro="Intro",
+            )
+
+        self.assertIsNotNone(recorder)
+        self.assertTrue(recorder.started)
+        self.assertEqual(recorder.target_dir, target_dir)
+        # Chemin de succes : le HUD reste ouvert, aucune erreur affichee.
+        self.assertIsNotNone(self.app.hud)
+        self.mocks["showerror"].assert_not_called()
+
+    def test_returns_none_and_recovers_ui_on_failure(self):
+        self.app.withdraw()
+        self.app._open_hud()
+        target_dir = self.tmp / "sessions" / "20260101-170000"
+
+        with mock.patch.object(gui_mod, "Recorder", self._FailingRecorder):
+            recorder = self.app._create_and_start_recorder(
+                target_dir, error_title="Titre d'erreur", error_intro="Intro d'erreur",
+            )
+
+        self.assertIsNone(recorder)
+        # Avant la factorisation (et avant le correctif original dont elle
+        # est issue), un echec ici laissait la fenetre principale cachee et
+        # le HUD bloque, sans le moindre message - l'utilisateur se
+        # retrouvait sans recours visible.
+        self.assertIsNone(self.app.hud)
+        self.assertEqual(self.app.state(), "normal")
+        self.mocks["showerror"].assert_called_once()
+        args, _kwargs = self.mocks["showerror"].call_args
+        self.assertEqual(args[0], "Titre d'erreur")
+        self.assertIn("Intro d'erreur", args[1])
+
+
+@unittest.skipUnless(_TK_AVAILABLE, "Aucun affichage Tk disponible dans cet environnement.")
+class RedactionEditorTestCase(_RealAppTestCase):
+    """Dimensions 26 et 28 de l'audit (Backlog) : l'editeur de redaction doit
+    se fermer via la touche Echap (comme le bouton "Terminer"), et rester
+    verrouille en taille (resizable(False, False)) - coherent avec le HUD,
+    deja verrouille pour la meme raison."""
+
+    def _open_editor(self):
+        session_dir = self.tmp / "sessions" / "20260101-180000"
+        session_dir.mkdir(parents=True)
+        step = self._make_step(1, session_dir)
+        self.app.session_dir = session_dir
+        self.app.steps = [step]
+        self.app._build_review_view()
+        self.app._open_redaction_editor(step)
+        editor = self.app.grab_current()
+        self.assertIsNotNone(editor, "l'editeur de redaction n'a pas pris le grab modal attendu")
+        return step, editor
+
+    def test_editor_window_is_locked_to_a_fixed_size(self):
+        step, editor = self._open_editor()
+        self.addCleanup(lambda: editor.destroy() if editor.winfo_exists() else None)
+        self.assertEqual(editor.resizable(), (0, 0))
+
+    def test_escape_closes_the_editor_like_the_finish_button(self):
+        step, editor = self._open_editor()
+        self.assertTrue(editor.winfo_exists())
+        # La reception d'un evenement clavier depend du focus (comme dans une
+        # vraie session utilisateur : l'editeur, fenetre modale active au
+        # premier plan, a naturellement le focus clavier au moment ou
+        # l'utilisateur appuie sur Echap).
+        editor.focus_force()
+        self.app.update()
+
+        editor.event_generate("<Escape>")
+        self.app.update()
+
+        self.assertFalse(editor.winfo_exists(), "Echap aurait du fermer l'editeur de redaction")
+
+    def test_escape_persists_redactions_added_before_closing(self):
+        step, editor = self._open_editor()
+        step.redactions.append((10, 10, 50, 50))  # simule une redaction deja tracee
+        editor.focus_force()
+        self.app.update()
+
+        editor.event_generate("<Escape>")
+        self.app.update()
+
+        meta_path = self.app.session_dir / gui_mod.SESSION_META_FILENAME
+        self.assertTrue(meta_path.exists())
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.assertEqual(meta["steps"][0]["redactions"], [[10, 10, 50, 50]])
+
+
+@unittest.skipUnless(_TK_AVAILABLE, "Aucun affichage Tk disponible dans cet environnement.")
+class DeleteUndoTestCase(_RealAppTestCase):
+    """Dimension 32 de l'audit (Backlog) : un bandeau "Annuler" temporaire
+    doit permettre de restaurer une etape supprimee par erreur, a sa position
+    d'origine - sans quoi une suppression confirmee (meme par un clic "Oui"
+    reflexe sur la mauvaise carte) n'offrait aucun recours depuis l'UI."""
+
+    def setUp(self):
+        super().setUp()
+        self.mocks["askyesno"].return_value = True  # confirme systematiquement la suppression
+
+    def test_undo_bar_is_hidden_by_default(self):
+        session_dir = self.tmp / "sessions" / "20260101-190000"
+        session_dir.mkdir(parents=True)
+        self.app.session_dir = session_dir
+        self.app.steps = [self._make_step(1, session_dir)]
+        self.app._build_review_view()
+        self.assertEqual(self.app._undo_frame.winfo_manager(), "")
+
+    def test_deleting_a_middle_step_offers_undo_and_restores_it_at_the_same_position(self):
+        session_dir = self.tmp / "sessions" / "20260101-190100"
+        session_dir.mkdir(parents=True)
+        steps = [self._make_step(i, session_dir) for i in (1, 2, 3)]
+        self.app.session_dir = session_dir
+        self.app.steps = steps
+        self.app._build_review_view()
+
+        middle = steps[1]
+        self.app._delete(middle)
+
+        # L'etape a bien disparu de la liste active...
+        self.assertEqual(len(self.app.steps), 2)
+        self.assertNotIn(middle, self.app.steps)
+        # ...mais le bandeau "Annuler" est maintenant visible.
+        self.assertEqual(self.app._undo_frame.winfo_manager(), "pack")
+
+        self.app._undo_delete()
+
+        self.assertEqual(len(self.app.steps), 3)
+        self.assertEqual(self.app.steps.index(middle), 1, "l'etape doit revenir a sa position d'origine")
+        self.assertEqual([s.index for s in self.app.steps], [1, 2, 3])
+        # La carte correspondante existe de nouveau dans l'UI.
+        self.assertIn(middle.uid, self.app._rows)
+        # Le bandeau se referme une fois l'annulation effectuee.
+        self.assertEqual(self.app._undo_frame.winfo_manager(), "")
+        # Le fichier image brut n'a jamais ete touche par la suppression -
+        # confirme que la restauration ne depend d'aucune relecture disque.
+        self.assertTrue(middle.raw_image_path.exists())
+
+    def test_undo_persists_to_session_json(self):
+        session_dir = self.tmp / "sessions" / "20260101-190200"
+        session_dir.mkdir(parents=True)
+        steps = [self._make_step(i, session_dir) for i in (1, 2)]
+        self.app.session_dir = session_dir
+        self.app.steps = steps
+        self.app._build_review_view()
+
+        self.app._delete(steps[0])
+        self.app._undo_delete()
+
+        meta_path = session_dir / gui_mod.SESSION_META_FILENAME
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(meta["steps"]), 2)
+
+    def test_undo_after_deleting_the_last_remaining_step_rebuilds_the_view(self):
+        session_dir = self.tmp / "sessions" / "20260101-190300"
+        session_dir.mkdir(parents=True)
+        step = self._make_step(1, session_dir)
+        self.app.session_dir = session_dir
+        self.app.steps = [step]
+        self.app._build_review_view()
+
+        self.app._delete(step)
+        self.assertEqual(self.app.steps, [])
+        # Les boutons d'export existent toujours (voir _build_review_view),
+        # simplement desactives quand la liste d'etapes est vide.
+        for btn in self.app._export_buttons:
+            self.assertEqual(str(btn.cget("state")), "disabled")
+
+        self.app._undo_delete()
+
+        self.assertEqual(self.app.steps, [step])
+        self.assertEqual(len(self.app._export_buttons), 3)
+        for btn in self.app._export_buttons:
+            self.assertEqual(str(btn.cget("state")), "normal")
+
+    def test_a_second_deletion_before_undo_replaces_the_pending_one(self):
+        session_dir = self.tmp / "sessions" / "20260101-190400"
+        session_dir.mkdir(parents=True)
+        steps = [self._make_step(i, session_dir) for i in (1, 2, 3)]
+        self.app.session_dir = session_dir
+        self.app.steps = list(steps)
+        self.app._build_review_view()
+
+        self.app._delete(steps[0])
+        self.app._delete(steps[1])
+
+        # Seule la suppression la PLUS RECENTE reste annulable (au plus une
+        # suppression "en attente" a la fois, voir _show_undo_bar).
+        self.app._undo_delete()
+        self.assertEqual(len(self.app.steps), 2)
+        self.assertIn(steps[1], self.app.steps)
+        self.assertNotIn(steps[0], self.app.steps)
+
+    def test_undo_is_a_no_op_without_a_pending_deletion(self):
+        session_dir = self.tmp / "sessions" / "20260101-190500"
+        session_dir.mkdir(parents=True)
+        self.app.session_dir = session_dir
+        self.app.steps = [self._make_step(1, session_dir)]
+        self.app._build_review_view()
+
+        self.app._undo_delete()  # ne doit pas lever, ni rien changer
+        self.assertEqual(len(self.app.steps), 1)
 
 
 if __name__ == "__main__":

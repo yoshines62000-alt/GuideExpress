@@ -26,9 +26,9 @@ RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 
 import update_checker
 from capture import (
-    Step, render_step_image, move_step, move_step_to, delete_step, duplicate_step,
-    sanitize_filename, get_window_at_point, step_to_dict, step_from_dict, renumber,
-    foreground_window_is_elevated,
+    Step, render_step_image, render_step_thumbnail, move_step, move_step_to, delete_step,
+    duplicate_step, sanitize_filename, get_window_at_point, step_to_dict, step_from_dict,
+    renumber, foreground_window_is_elevated, get_cursor_pos, get_monitor_work_area_at_point,
 )
 from recorder import Recorder
 from export import export_html, export_markdown, export_pdf
@@ -210,6 +210,14 @@ class GuideExpressApp(tk.Tk):
         # reconstruire (donc sans jamais rappeler render_step_image) pour les
         # operations qui ne changent pas son contenu.
         self._rows: dict = {}
+        # Derniere etape supprimee, tant que "Annuler" reste possible (voir
+        # _delete/_show_undo_bar/_undo_delete, trouvaille d'audit dimension
+        # 32) - initialise ici par securite (aucune suppression n'est
+        # possible avant que _build_review_view() n'ait tourne au moins une
+        # fois, mais un attribut absent serait une AttributeError plus
+        # deroutante qu'un simple no-op si jamais un appel y accedait tot).
+        self._last_deleted = None
+        self._undo_after_id = None
         self._container = ttk.Frame(self)
         self._container.pack(fill="both", expand=True)
 
@@ -561,6 +569,54 @@ class GuideExpressApp(tk.Tk):
     # Enregistrement
     # ------------------------------------------------------------------
 
+    def _create_and_start_recorder(self, target_dir: Path, *, error_title: str, error_intro: str):
+        """Cree ET demarre un Recorder pointant vers `target_dir`, avec la
+        protection commune utilisee par _start_recording et _retake_step :
+        la creation (mkdir du dossier cible) et le demarrage (installation du
+        hook souris bas-niveau pynput) peuvent tous deux echouer
+        independamment (dossier non accessible en ecriture ;
+        permissions/antivirus/EDR bloquant l'installation du hook). Exclut
+        aussi notre propre fenetre HUD des clics enregistres au passage (sans
+        ca, cliquer sur "Arreter"/"Annuler" ajouterait une derniere etape
+        parasite au guide) - note : `winfo_id()` de Tkinter ne correspond PAS
+        au HWND de haut niveau que Windows rapporte via WindowFromPoint (Tk
+        cree une fenetre-cadre interne distincte), d'ou l'interrogation
+        directe de l'OS sur un point reellement situe dans le HUD.
+        En cas d'echec, ramene l'utilisateur a un etat utilisable (fenetre
+        principale visible, HUD ferme, message clair) plutot que de le
+        laisser bloque sans recours, et renvoie None - a l'appelant de ne
+        jamais continuer dans ce cas.
+        Factorise depuis _start_recording et _retake_step (trouvaille
+        d'audit, dimension 24) : les deux dupliquaient integralement ce
+        calcul d'exclusion et cette gestion d'erreur (une trentaine de lignes
+        quasi identiques chacun), avec le risque qu'un futur correctif
+        applique a l'un des deux chemins soit oublie dans l'autre."""
+        self.hud.update_idletasks()
+        hud_cx = self.hud.winfo_rootx() + self.hud.winfo_width() // 2
+        hud_cy = self.hud.winfo_rooty() + self.hud.winfo_height() // 2
+        hud_hwnd = get_window_at_point(hud_cx, hud_cy)
+        excluded = {hud_hwnd} if hud_hwnd else set()
+        try:
+            recorder = Recorder(target_dir, excluded_hwnds=excluded)
+            recorder.start()
+            return recorder
+        except Exception as exc:  # noqa: BLE001 - toute cause d'echec doit
+            # ramener l'utilisateur a un etat utilisable (fenetre visible,
+            # message clair) plutot que le laisser bloque sans recours.
+            if self.hud is not None:
+                self.hud.destroy()
+                self.hud = None
+            self.deiconify()
+            messagebox.showerror(
+                error_title,
+                f"{error_intro}\n\n"
+                "Causes possibles : permissions insuffisantes, antivirus/EDR "
+                "bloquant l'ecoute de la souris, ou dossier de session "
+                "inaccessible en ecriture.\n\n"
+                f"Detail : {exc}",
+            )
+            return None
+
     def _start_recording(self):
         session_dir = SESSIONS_DIR / time.strftime("%Y%m%d-%H%M%S")
         self.session_dir = session_dir
@@ -570,48 +626,14 @@ class GuideExpressApp(tk.Tk):
 
         self.withdraw()
         self._open_hud()
-        # Exclut notre propre fenetre HUD des clics enregistres : sans ca,
-        # cliquer sur "Arreter l'enregistrement" ajouterait une derniere
-        # etape parasite au guide. Note : `winfo_id()` de Tkinter ne
-        # correspond PAS au HWND de haut niveau que Windows rapporte via
-        # WindowFromPoint (Tk cree une fenetre-cadre interne distincte) - on
-        # doit donc interroger l'OS sur un point reellement situe dans le
-        # HUD pour obtenir le HWND a comparer avec la meme logique que celle
-        # utilisee par le Recorder au moment du clic.
-        self.hud.update_idletasks()
-        hud_cx = self.hud.winfo_rootx() + self.hud.winfo_width() // 2
-        hud_cy = self.hud.winfo_rooty() + self.hud.winfo_height() // 2
-        hud_hwnd = get_window_at_point(hud_cx, hud_cy)
-        excluded = {hud_hwnd} if hud_hwnd else set()
-        # Cree ET demarre le Recorder dans le meme bloc protege : la creation
-        # (mkdir du dossier de session) et le demarrage (installation du hook
-        # souris bas-niveau pynput) peuvent tous deux echouer independamment
-        # (dossier non accessible en ecriture ; permissions/antivirus/EDR
-        # bloquant l'installation du hook). Sans cette protection, l'exception
-        # remontait non geree APRES self.withdraw()/self._open_hud() : la
-        # fenetre principale restait cachee et le HUD bloque a "0 etape(s)",
-        # sans aucun moyen visible de s'en sortir ni le moindre message
-        # d'erreur (bug trouve a l'audit).
-        try:
-            self.recorder = Recorder(session_dir, excluded_hwnds=excluded)
-            self.recorder.start()
-        except Exception as exc:  # noqa: BLE001 - toute cause d'echec doit
-            # ramener l'utilisateur a un etat utilisable (fenetre visible,
-            # message clair) plutot que le laisser bloque sans recours.
-            self.recorder = None
-            if self.hud is not None:
-                self.hud.destroy()
-                self.hud = None
-            self.deiconify()
-            messagebox.showerror(
-                "Enregistrement impossible",
-                "L'enregistrement n'a pas pu demarrer.\n\n"
-                "Causes possibles : permissions insuffisantes, antivirus/EDR "
-                "bloquant l'ecoute de la souris, ou dossier de session "
-                "inaccessible en ecriture.\n\n"
-                f"Detail : {exc}",
-            )
+        recorder = self._create_and_start_recorder(
+            session_dir,
+            error_title="Enregistrement impossible",
+            error_intro="L'enregistrement n'a pas pu demarrer.",
+        )
+        if recorder is None:
             return
+        self.recorder = recorder
         self.after(150, self._poll_events)
 
     def _open_hud(self):
@@ -649,8 +671,32 @@ class GuideExpressApp(tk.Tk):
         ttk.Button(frame, text="Arreter l'enregistrement", command=self._stop_recording).pack()
 
         self.hud.update_idletasks()
-        screen_w = self.hud.winfo_screenwidth()
-        self.hud.geometry(f"+{screen_w - 260}+20")
+        self._position_hud_top_right()
+
+    def _position_hud_top_right(self, margin_right: int = 260, margin_top: int = 20) -> None:
+        """Positionne self.hud en haut a droite du moniteur qui contient le
+        curseur au moment de l'ouverture (trouvaille d'audit, dimension 15),
+        plutot que systematiquement sur l'ecran PRINCIPAL Windows :
+        winfo_screenwidth() (comportement precedent) ne renvoie jamais que la
+        largeur du moniteur principal, independamment de l'endroit ou
+        l'utilisateur travaille reellement en configuration multi-ecrans - le
+        HUD (compteur d'etapes, bouton Arreter) pouvait alors apparaitre
+        systematiquement loin de la zone de travail reelle sur un ecran
+        secondaire. Repli sur l'ancien comportement (ecran principal) si la
+        position du curseur ou les infos du moniteur sont indisponibles (hors
+        Windows, echec d'un appel Win32...)."""
+        area = None
+        cursor = get_cursor_pos()
+        if cursor is not None:
+            area = get_monitor_work_area_at_point(*cursor)
+        if area is not None:
+            _left, top, right, _bottom = area
+            x = right - margin_right
+            y = top + margin_top
+        else:
+            x = self.hud.winfo_screenwidth() - margin_right
+            y = margin_top
+        self.hud.geometry(f"+{x}+{y}")
 
     def _toggle_pause_recording(self):
         if self.recorder is None:
@@ -790,6 +836,14 @@ class GuideExpressApp(tk.Tk):
         self._save_session_meta()
         self._clear_container()
         self._rows = {}
+        # Filet de rattrapage pour une suppression accidentelle (trouvaille
+        # d'audit, dimension 32) : reinitialise a chaque reconstruction
+        # COMPLETE de l'ecran (nouvelle session, reouverture...), puisque
+        # _clear_container() ci-dessus detruit de toute facon le bandeau
+        # "Annuler" d'une eventuelle suppression precedente - voir
+        # _show_undo_bar/_hide_undo_bar/_undo_delete.
+        self._last_deleted = None
+        self._undo_after_id = None
 
         top = ttk.Frame(self._container, padding=(10, 10, 10, 0))
         top.pack(fill="x")
@@ -806,6 +860,18 @@ class GuideExpressApp(tk.Tk):
         title_entry.bind("<Return>", lambda e: self._save_session_meta())
         self._step_count_var = tk.StringVar(value=f"{len(self.steps)} etape(s)")
         ttk.Label(top, textvariable=self._step_count_var).pack(side="left", padx=12)
+
+        # Bandeau "Annuler la suppression" (trouvaille d'audit, dimension 32) :
+        # cree ici mais jamais pack() par defaut - _show_undo_bar()
+        # l'affiche uniquement juste apres une suppression confirmee, pour un
+        # temps limite. Le fichier image brut de l'etape n'est de toute facon
+        # jamais supprime du disque par delete_step (voir son commentaire) :
+        # reinserer la meme reference a sa position d'origine suffit donc a
+        # annuler completement l'operation.
+        self._undo_frame = ttk.Frame(top)
+        self._undo_status_var = tk.StringVar(value="")
+        ttk.Label(self._undo_frame, textvariable=self._undo_status_var, foreground="#b35900").pack(side="left", padx=(0, 6))
+        ttk.Button(self._undo_frame, text="Annuler", command=self._undo_delete).pack(side="left")
 
         list_frame = ttk.Frame(self._container)
         list_frame.pack(fill="both", expand=True, padx=10, pady=10)
@@ -945,7 +1011,14 @@ class GuideExpressApp(tk.Tk):
         if cached is not None:
             return cached
         try:
-            img = render_step_image(step, zoom=step.zoom)
+            # render_step_thumbnail (pas render_step_image + img.thumbnail())
+            # dessine le marqueur de clic APRES reduction, a une taille
+            # garantie plutot que de reduire un marqueur deja dessine en
+            # pleine resolution - sans ca, l'anneau de clic tombait a
+            # quelques pixels a peine sur une capture haute resolution,
+            # difficile a reperer dans une longue liste de cartes
+            # (trouvaille d'audit, dimension 16).
+            img = render_step_thumbnail(step, THUMBNAIL_MAX_SIZE, zoom=step.zoom)
         except (OSError, ValueError):
             logging.getLogger(__name__).warning(
                 "Image brute illisible pour l'etape %s (%s)",
@@ -956,7 +1029,6 @@ class GuideExpressApp(tk.Tk):
             self._thumbnail_cache[step.uid] = photo
             return photo
         self._thumbnail_error_uids.discard(step.uid)
-        img.thumbnail(THUMBNAIL_MAX_SIZE)
         photo = ImageTk.PhotoImage(img)
         self._thumbnail_cache[step.uid] = photo
         return photo
@@ -1150,11 +1222,74 @@ class GuideExpressApp(tk.Tk):
             # Cas rare (derniere etape supprimee) : reconstruction complete
             # pour reafficher le message "Aucune etape capturee" et
             # desactiver les boutons d'export, sans logique dediee pour un
-            # etat qui ne se produit qu'une fois par guide au plus.
+            # etat qui ne se produit qu'une fois par guide au plus. Le
+            # bandeau "Annuler" est reoffert APRES cette reconstruction (voir
+            # _show_undo_bar plus bas) : _build_review_view() reinitialise
+            # _last_deleted a None au passage (nouveau bandeau, nouveaux
+            # widgets), il ne faut donc jamais l'appeler avant.
             self._build_review_view()
+            self._show_undo_bar(step, index)
             return
         for s in self.steps:
             self._rows[s.uid]["index_var"].set(f"Etape {s.index}")
+        self._save_session_meta()
+        self._update_step_count_and_buttons()
+        self._show_undo_bar(step, index)
+
+    def _show_undo_bar(self, step, index):
+        """Affiche le bandeau "Annuler" pendant quelques secondes apres une
+        suppression confirmee (trouvaille d'audit, dimension 32) : la
+        confirmation par boite de dialogue (messagebox.askyesno ci-dessus)
+        limite deja le risque, mais un clic "Oui" reflexe sur la mauvaise
+        carte dans une longue liste reste possible et, jusqu'ici, sans aucun
+        recours depuis l'interface une fois confirme. Au plus UNE suppression
+        "en attente d'annulation" a la fois (une nouvelle suppression avant
+        expiration remplace la precedente) - suffisant pour l'usage vise
+        (rattraper une erreur de clic immediate), pas une pile d'annulation
+        generale."""
+        if not hasattr(self, "_undo_frame"):
+            return
+        self._last_deleted = (step, index)
+        self._undo_status_var.set(f"Etape {step.index} supprimee.")
+        self._undo_frame.pack(side="left", padx=(12, 0))
+        if self._undo_after_id is not None:
+            self.after_cancel(self._undo_after_id)
+        self._undo_after_id = self.after(8000, self._hide_undo_bar)
+
+    def _hide_undo_bar(self):
+        self._last_deleted = None
+        if getattr(self, "_undo_after_id", None) is not None:
+            self.after_cancel(self._undo_after_id)
+            self._undo_after_id = None
+        if hasattr(self, "_undo_frame"):
+            self._undo_frame.pack_forget()
+
+    def _undo_delete(self):
+        """Reinsere la derniere etape supprimee a sa position d'origine -
+        voir _show_undo_bar. Reconstruction incrementale (pas de rappel a
+        render_step_image pour les etapes deja affichees) sur le meme modele
+        que _duplicate : construit la carte de l'etape reinseree puis
+        reordonne TOUTES les cartes deja existantes selon self.steps, sans
+        jamais re-rendre leurs images (meme cout que Haut/Bas - mesure a
+        0.42s pour 300 etapes, trouvaille d'audit dimension 9 - largement
+        acceptable pour une action aussi rare qu'un "annuler")."""
+        if self._last_deleted is None:
+            return
+        step, index = self._last_deleted
+        was_empty = not self.steps
+        self._hide_undo_bar()
+        index = max(0, min(index, len(self.steps)))
+        self.steps.insert(index, step)
+        renumber(self.steps)
+        if was_empty:
+            # Seul cas ou l'ecran affichait le message "Aucune etape
+            # capturee" (voir _build_review_view) : une reconstruction
+            # complete est necessaire pour le retirer - cout negligeable,
+            # une seule etape a (re)construire.
+            self._build_review_view()
+            return
+        self._insert_row_after(step, None)
+        self._reorder_and_repack()
         self._save_session_meta()
         self._update_step_count_and_buttons()
 
@@ -1180,11 +1315,6 @@ class GuideExpressApp(tk.Tk):
         self.withdraw()
         self._open_retake_hud(step)
 
-        self.hud.update_idletasks()
-        hud_cx = self.hud.winfo_rootx() + self.hud.winfo_width() // 2
-        hud_cy = self.hud.winfo_rooty() + self.hud.winfo_height() // 2
-        hud_hwnd = get_window_at_point(hud_cx, hud_cy)
-        excluded = {hud_hwnd} if hud_hwnd else set()
         # Sous-dossier dedie aux reprises, propre a CETTE etape : un nouveau
         # Recorder recommence sa propre numerotation a 1 a chaque reprise, ce
         # qui ecraserait silencieusement la reprise d'une AUTRE etape si
@@ -1203,28 +1333,20 @@ class GuideExpressApp(tk.Tk):
         # reprise precedente de la MEME etape (meme uid), et sur un dossier
         # distinct pour toute autre etape, dupliquee ou non.
         retake_dir = self.session_dir / "retakes" / step.uid
-        # Meme protection que _start_recording (voir son commentaire) : la
-        # reprise passe elle aussi par self.withdraw() avant de creer/demarrer
-        # le Recorder, donc le meme risque de fenetre cachee + HUD bloque sans
-        # message d'erreur s'applique ici a l'identique.
-        try:
-            self._retake_recorder = Recorder(retake_dir, excluded_hwnds=excluded)
-            self._retake_recorder.start()
-        except Exception as exc:  # noqa: BLE001
-            self._retake_recorder = None
-            if self.hud is not None:
-                self.hud.destroy()
-                self.hud = None
-            self.deiconify()
-            messagebox.showerror(
-                "Reprise impossible",
-                "La reprise de cette etape n'a pas pu demarrer.\n\n"
-                "Causes possibles : permissions insuffisantes, antivirus/EDR "
-                "bloquant l'ecoute de la souris, ou dossier de session "
-                "inaccessible en ecriture.\n\n"
-                f"Detail : {exc}",
-            )
+        # Meme protection que _start_recording, factorisee dans
+        # _create_and_start_recorder (voir son commentaire, trouvaille
+        # d'audit dimension 24) : la reprise passe elle aussi par
+        # self.withdraw() avant de creer/demarrer le Recorder, donc le meme
+        # risque de fenetre cachee + HUD bloque sans message d'erreur
+        # s'applique ici a l'identique.
+        recorder = self._create_and_start_recorder(
+            retake_dir,
+            error_title="Reprise impossible",
+            error_intro="La reprise de cette etape n'a pas pu demarrer.",
+        )
+        if recorder is None:
             return
+        self._retake_recorder = recorder
         self.after(150, self._poll_retake)
 
     def _open_retake_hud(self, step):
@@ -1243,8 +1365,7 @@ class GuideExpressApp(tk.Tk):
         ttk.Button(frame, text="Annuler", command=self._cancel_retake).pack()
 
         self.hud.update_idletasks()
-        screen_w = self.hud.winfo_screenwidth()
-        self.hud.geometry(f"+{screen_w - 260}+20")
+        self._position_hud_top_right()
 
     def _poll_retake(self):
         if self._retake_recorder is None:
@@ -1384,7 +1505,27 @@ class GuideExpressApp(tk.Tk):
         editor = tk.Toplevel(self)
         editor.title(f"Rediger - Etape {step.index}")
         editor.transient(self)
+        # Le canvas interne est cree une seule fois a une taille FIXE
+        # (display_img.width/height, plafonnee par EDITOR_MAX_SIZE) : sans
+        # cette ligne, agrandir manuellement cette fenetre laissait un espace
+        # vide autour de l'image (le canvas ne s'adapte jamais), et la
+        # reduire rognait simplement le contenu sans aucune barre de
+        # defilement pour l'atteindre - incoherent avec le HUD (gui.py,
+        # _open_hud), deja verrouille en taille pour la meme raison
+        # (trouvaille d'audit, dimension 28).
+        editor.resizable(False, False)
         editor.protocol("WM_DELETE_WINDOW", lambda: self._close_editor(editor, step))
+        # Raccourci clavier standard pour fermer une fenetre modale
+        # (trouvaille d'audit, dimension 26) : avant ce correctif, aucune
+        # touche Echap n'etait geree dans le fichier, seul un clic sur
+        # "Terminer" ou la case de fermeture Windows fonctionnait. Appelle la
+        # meme fonction que "Terminer" (pas une simple fermeture "annuler") :
+        # les redactions dessinees sont deja appliquees a step.redactions au
+        # fur et a mesure (voir on_release ci-dessous), il n'y a donc rien a
+        # perdre a fermer par Echap - contrairement au HUD d'enregistrement,
+        # ou un Echap accidentel pourrait interrompre une capture en cours
+        # sans le vouloir (volontairement laisse de cote ici).
+        editor.bind("<Escape>", lambda event: self._close_editor(editor, step))
         editor.grab_set()
 
         display_img = full_img.copy()

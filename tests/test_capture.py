@@ -136,6 +136,130 @@ class RenderStepImageTestCase(unittest.TestCase):
             cap.render_step_image(step)
 
 
+class RenderStepThumbnailTestCase(unittest.TestCase):
+    """Trouvaille d'audit, dimension 16 : le marqueur de clic doit rester
+    nettement visible dans la miniature de l'ecran de relecture, meme apres
+    une forte reduction, sans changer la fidelite du rendu pleine resolution
+    utilise par l'export et l'editeur de redaction (render_step_image,
+    inchange par ce correctif)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.max_size = (220, 150)
+
+    def _step(self, raw_image_path, **overrides):
+        defaults = dict(
+            index=1, raw_image_path=raw_image_path, click_x=800, click_y=450,
+            window_title="Google Chrome", timestamp="2026-01-01 10:00:00",
+        )
+        defaults.update(overrides)
+        return cap.Step(**defaults)
+
+    def _marker_pixel_count(self, img, color):
+        width, height = img.size
+        return sum(
+            1 for y in range(height) for x in range(width)
+            if img.getpixel((x, y)) == color
+        )
+
+    def test_thumbnail_marker_stays_visible_on_a_highly_reduced_image(self):
+        # Capture large (facteur de reduction ~7.3x vers 220x150) : avant ce
+        # correctif, dessiner le marqueur en pleine resolution PUIS reduire
+        # faisait tomber l'anneau a quelques pixels a peine (trouvaille
+        # d'audit). THUMBNAIL_MARKER_RADIUS/WIDTH garantissent desormais une
+        # taille minimale, independamment du facteur de reduction.
+        raw_path = self.tmp / "big.png"
+        Image.new("RGB", (1600, 900), color=(255, 255, 255)).save(raw_path)
+        step = self._step(raw_path, click_x=800, click_y=450)
+        thumb = cap.render_step_thumbnail(step, self.max_size)
+        count = self._marker_pixel_count(thumb, cap.CLICK_MARKER_COLOR)
+        # Anneau de rayon THUMBNAIL_MARKER_RADIUS/largeur THUMBNAIL_MARKER_WIDTH :
+        # nettement plus que les quelques pixels obtenus par simple reduction
+        # d'un marqueur pleine resolution (CLICK_MARKER_RADIUS=22 reduit par
+        # ~7.3x donnerait un anneau d'environ 3px de rayon).
+        self.assertGreater(count, 50)
+
+    def test_thumbnail_size_never_exceeds_max_size(self):
+        raw_path = self.tmp / "big.png"
+        Image.new("RGB", (1600, 900), color=(255, 255, 255)).save(raw_path)
+        step = self._step(raw_path)
+        thumb = cap.render_step_thumbnail(step, self.max_size)
+        self.assertLessEqual(thumb.width, self.max_size[0])
+        self.assertLessEqual(thumb.height, self.max_size[1])
+
+    def test_thumbnail_marker_uses_right_click_color_when_relevant(self):
+        raw_path = self.tmp / "big.png"
+        Image.new("RGB", (1600, 900), color=(255, 255, 255)).save(raw_path)
+        step = self._step(raw_path, button="right")
+        thumb = cap.render_step_thumbnail(step, self.max_size)
+        count = self._marker_pixel_count(thumb, cap.RIGHT_CLICK_MARKER_COLOR)
+        self.assertGreater(count, 50)
+
+    def test_thumbnail_marker_visible_with_zoom_crop_too(self):
+        # Le marqueur doit rester visible et rester attache a la position
+        # reelle du clic meme apres le recadrage zoome (les coordonnees du
+        # clic changent de repere une fois l'image recadree).
+        raw_path = self.tmp / "big.png"
+        Image.new("RGB", (1600, 900), color=(255, 255, 255)).save(raw_path)
+        step = self._step(raw_path, click_x=800, click_y=450, zoom=True)
+        thumb = cap.render_step_thumbnail(step, self.max_size, zoom=True)
+        count = self._marker_pixel_count(thumb, cap.CLICK_MARKER_COLOR)
+        self.assertGreater(count, 20)
+
+    def test_thumbnail_leaves_raw_file_on_disk_unmodified(self):
+        raw_path = self.tmp / "raw.png"
+        Image.new("RGB", (400, 300), color=(255, 255, 255)).save(raw_path)
+        original_bytes = raw_path.read_bytes()
+        step = self._step(raw_path, click_x=200, click_y=150)
+        cap.render_step_thumbnail(step, self.max_size)
+        self.assertEqual(raw_path.read_bytes(), original_bytes)
+
+    def test_thumbnail_raises_a_clear_error_when_raw_file_is_missing(self):
+        step = self._step(self.tmp / "n_existe_pas.png")
+        with self.assertRaises((OSError, ValueError)):
+            cap.render_step_thumbnail(step, self.max_size)
+
+
+class HudMonitorPositioningTestCase(unittest.TestCase):
+    """Trouvaille d'audit, dimension 15 : positionnement du HUD sur le
+    moniteur qui contient le curseur, plutot que systematiquement sur
+    l'ecran principal Windows en configuration multi-ecrans."""
+
+    def test_get_cursor_pos_returns_a_pair_of_ints_on_windows(self):
+        pos = cap.get_cursor_pos()
+        if pos is None:
+            self.skipTest("GetCursorPos indisponible dans cet environnement")
+        x, y = pos
+        self.assertIsInstance(x, int)
+        self.assertIsInstance(y, int)
+
+    def test_get_monitor_work_area_at_point_returns_a_sane_rectangle(self):
+        area = cap.get_monitor_work_area_at_point(0, 0)
+        if area is None:
+            self.skipTest("GetMonitorInfoW indisponible dans cet environnement")
+        left, top, right, bottom = area
+        self.assertLess(left, right)
+        self.assertLess(top, bottom)
+
+    def test_get_cursor_pos_returns_none_on_os_error(self):
+        with mock.patch.object(cap, "_user32") as mock_user32:
+            mock_user32.GetCursorPos.side_effect = OSError("echec simule")
+            self.assertIsNone(cap.get_cursor_pos())
+
+    def test_get_cursor_pos_returns_none_when_user32_unavailable(self):
+        with mock.patch.object(cap, "_user32", None):
+            self.assertIsNone(cap.get_cursor_pos())
+
+    def test_get_monitor_work_area_returns_none_on_os_error(self):
+        with mock.patch.object(cap, "_user32") as mock_user32:
+            mock_user32.MonitorFromPoint.side_effect = OSError("echec simule")
+            self.assertIsNone(cap.get_monitor_work_area_at_point(0, 0))
+
+    def test_get_monitor_work_area_returns_none_when_monitorinfo_unavailable(self):
+        with mock.patch.object(cap, "_MONITORINFO", None):
+            self.assertIsNone(cap.get_monitor_work_area_at_point(0, 0))
+
+
 class ReorderingTestCase(unittest.TestCase):
     def _steps(self, n):
         return [
@@ -370,6 +494,29 @@ class SanitizeFilenameTestCase(unittest.TestCase):
         # Seul le nom EXACT est reserve ; un titre qui le contient simplement
         # ne doit pas etre modifie inutilement.
         self.assertEqual(cap.sanitize_filename("Configuration"), "Configuration")
+
+    def test_very_long_title_is_truncated(self):
+        # Trouvaille d'audit, dimension 31 : un titre demesurement long,
+        # combine a une destination d'export deja profonde, pourrait
+        # approcher la limite historique MAX_PATH (260) de Windows pour un
+        # chemin COMPLET.
+        result = cap.sanitize_filename("A" * 500)
+        self.assertLessEqual(len(result), cap._MAX_FILENAME_LENGTH)
+        self.assertTrue(result)
+
+    def test_truncation_does_not_leave_a_trailing_space_or_dot(self):
+        # Couper au milieu d'un nom peut laisser un espace ou un point en fin
+        # de chaine juste apres la troncature - egalement invalides comme
+        # dernier caractere d'un nom de fichier/dossier Windows.
+        name = "A" * (cap._MAX_FILENAME_LENGTH - 1) + "   .   trailing garbage"
+        result = cap.sanitize_filename(name)
+        self.assertFalse(result.endswith(" "))
+        self.assertFalse(result.endswith("."))
+
+    def test_short_titles_are_never_truncated(self):
+        title = "Guide utilisateur assez long mais raisonnable pour un titre normal"
+        self.assertLess(len(title), cap._MAX_FILENAME_LENGTH)
+        self.assertEqual(cap.sanitize_filename(title), title)
 
 
 class WindowLookupErrorHandlingTestCase(unittest.TestCase):

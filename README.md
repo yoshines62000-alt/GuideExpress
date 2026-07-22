@@ -192,17 +192,31 @@ Latin-1, privilégiez l'export HTML ou Markdown.
 
 Pour distribuer l'outil sans que le destinataire ait besoin d'installer
 Python ni les dépendances, un exécutable Windows autonome peut être généré
-avec [PyInstaller](https://pyinstaller.org/) :
+avec [PyInstaller](https://pyinstaller.org/), **dans un environnement
+virtuel dédié** :
 
 ```bash
-python -m pip install pyinstaller
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install -r requirements.txt pyinstaller
 python -m PyInstaller GuideExpress.spec
 ```
 
+Le fichier `.spec` du dépôt fixe la configuration de build (options
+PyInstaller) pour un résultat reproductible, mais cette configuration seule
+ne suffit pas : PyInstaller analyse aussi les paquets réellement présents
+dans l'environnement Python qui l'exécute. Un environnement partagé
+contenant d'autres paquets sans rapport avec ce projet (installés pour
+d'autres besoins sur la même machine) n'empêche généralement pas le build
+de réussir, mais rend le résultat dépendant de ce qui se trouve d'installé
+sur la machine du moment, plutôt que strictement déterminé par
+`requirements.txt`. Un environnement virtuel neuf, limité à
+`requirements.txt` et `pyinstaller`, garantit que seuls les paquets
+réellement nécessaires sont visibles par l'analyse de PyInstaller.
+
 L'exécutable est produit dans `dist/GuideExpress.exe` (fichier unique, sans
-console). Le fichier `.spec` du dépôt fixe la configuration de build pour un
-résultat reproductible. Les dossiers `build/` et `dist/` ne sont pas suivis
-par Git.
+console). Les dossiers `build/`, `dist/` et `.venv/` ne sont pas suivis par
+Git.
 
 ## Tests
 

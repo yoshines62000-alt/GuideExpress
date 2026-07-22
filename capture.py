@@ -38,6 +38,8 @@ REDACTION_COLOR = (20, 20, 20)
 # (improbable en pratique, mais peu couteux a fiabiliser). `_user32` vaut None
 # hors Windows ou si l'initialisation echoue ; chaque fonction ci-dessous gere
 # deja ce cas via son propre try/except.
+_MONITORINFO = None
+
 try:
     import ctypes.wintypes as _wintypes
     _user32 = ctypes.windll.user32
@@ -53,9 +55,28 @@ try:
     _user32.GetForegroundWindow.restype = _wintypes.HWND
     _user32.GetWindowThreadProcessId.argtypes = [_wintypes.HWND, ctypes.POINTER(_wintypes.DWORD)]
     _user32.GetWindowThreadProcessId.restype = _wintypes.DWORD
+    # Signatures pour le positionnement du HUD sur le moniteur sous le
+    # curseur (trouvaille d'audit, dimension 15) - voir get_cursor_pos et
+    # get_monitor_work_area_at_point ci-dessous.
+    _user32.GetCursorPos.argtypes = [ctypes.POINTER(_wintypes.POINT)]
+    _user32.GetCursorPos.restype = _wintypes.BOOL
+    _user32.MonitorFromPoint.argtypes = [_wintypes.POINT, ctypes.c_uint]
+    _user32.MonitorFromPoint.restype = _wintypes.HANDLE
+
+    class _MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.c_ulong),
+            ("rcMonitor", _wintypes.RECT),
+            ("rcWork", _wintypes.RECT),
+            ("dwFlags", ctypes.c_ulong),
+        ]
+
+    _user32.GetMonitorInfoW.argtypes = [_wintypes.HANDLE, ctypes.POINTER(_MONITORINFO)]
+    _user32.GetMonitorInfoW.restype = _wintypes.BOOL
 except (AttributeError, OSError):
     _wintypes = None
     _user32 = None
+    _MONITORINFO = None
 
 # Signatures Win32 pour la detection UIPI/elevation (voir
 # foreground_window_is_elevated ci-dessous) : distinctes du bloc _user32
@@ -181,6 +202,57 @@ def get_window_text(hwnd) -> str:
     hook) elimine ce risque : un GetWindowTextW lent y est sans consequence
     pour la capture des clics suivants."""
     return _get_window_text(hwnd)
+
+
+# ---------------------------------------------------------------------------
+# Positionnement du HUD sur le bon moniteur (trouvaille d'audit, dimension 15)
+# ---------------------------------------------------------------------------
+# Tk.winfo_screenwidth() ne renvoie jamais que la largeur de l'ecran PRINCIPAL
+# Windows, independamment de l'endroit ou l'utilisateur travaille reellement
+# en configuration multi-ecrans : le HUD (statut d'enregistrement, compteur
+# d'etapes, bouton Arreter) apparaissait alors systematiquement sur l'ecran
+# principal, potentiellement loin de la zone de travail reelle sur un ecran
+# secondaire. Les deux fonctions ci-dessous permettent a gui.py de calculer la
+# position du HUD relativement au moniteur qui contient le curseur au moment
+# de l'ouverture, plutot que systematiquement au moniteur principal.
+
+def get_cursor_pos() -> Optional[tuple]:
+    """Position actuelle du curseur en coordonnees ecran. Renvoie None si
+    indisponible (hors Windows, echec d'un appel Win32...) - jamais
+    d'exception."""
+    if _user32 is None:
+        return None
+    try:
+        pt = _wintypes.POINT()
+        if not _user32.GetCursorPos(ctypes.byref(pt)):
+            return None
+        return (pt.x, pt.y)
+    except (AttributeError, OSError):
+        return None
+
+
+def get_monitor_work_area_at_point(x: int, y: int) -> Optional[tuple]:
+    """Zone de travail (left, top, right, bottom - exclut la barre des
+    taches) du moniteur physique contenant le point (x, y) donne. Renvoie
+    None si indisponible. MONITOR_DEFAULTTONEAREST (2) : si le point ne
+    tombe exactement sur aucun moniteur (rare, mais possible en bordure),
+    retombe sur le moniteur le plus proche plutot que d'echouer."""
+    if _user32 is None or _MONITORINFO is None:
+        return None
+    try:
+        MONITOR_DEFAULTTONEAREST = 2
+        pt = _wintypes.POINT(x, y)
+        hmonitor = _user32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
+        if not hmonitor:
+            return None
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(_MONITORINFO)
+        if not _user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+            return None
+        r = info.rcWork
+        return (r.left, r.top, r.right, r.bottom)
+    except (AttributeError, OSError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -347,14 +419,77 @@ def render_step_image(step: Step, zoom: bool = False) -> Image.Image:
     return img
 
 
-def _crop_zoomed_region(img: Image.Image, cx: int, cy: int, half_size: int = 260) -> Image.Image:
-    """Recadre une zone centree sur le clic, pour un aperçu rapproche (miniature)."""
-    width, height = img.size
+def _zoomed_region_bounds(width: int, height: int, cx: int, cy: int, half_size: int = 260) -> tuple:
+    """Bornes (left, top, right, bottom) de la zone de recadrage centree sur
+    le clic, SANS effectuer le recadrage lui-meme - factorise depuis
+    _crop_zoomed_region pour permettre a render_step_thumbnail de suivre le
+    deplacement du point de clic apres un recadrage zoome (voir plus bas)."""
     left = max(0, min(cx - half_size, width - 2 * half_size)) if width > 2 * half_size else 0
     top = max(0, min(cy - half_size, height - 2 * half_size)) if height > 2 * half_size else 0
     right = min(width, left + 2 * half_size)
     bottom = min(height, top + 2 * half_size)
+    return (left, top, right, bottom)
+
+
+def _crop_zoomed_region(img: Image.Image, cx: int, cy: int, half_size: int = 260) -> Image.Image:
+    """Recadre une zone centree sur le clic, pour un aperçu rapproche (miniature)."""
+    left, top, right, bottom = _zoomed_region_bounds(img.width, img.height, cx, cy, half_size)
     return img.crop((left, top, right, bottom))
+
+
+# Marqueur de clic a taille GARANTIE pour la miniature de l'ecran de relecture
+# (trouvaille d'audit, dimension 16) : CLICK_MARKER_RADIUS/WIDTH sont
+# dimensionnes pour une image en PLEINE resolution (export, editeur de
+# redaction) - render_step_image dessine le marqueur AVANT toute reduction,
+# donc pour une capture 1600x900 reduite a THUMBNAIL_MAX_SIZE (gui.py, facteur
+# ~7.3x), l'anneau tombe a environ 6 px de diametre, difficile a reperer au
+# premier coup d'oeil dans une longue liste de cartes. Ces valeurs restent
+# nettement visibles a la taille de la miniature (220x150) sans jamais la
+# depasser.
+THUMBNAIL_MARKER_RADIUS = 8
+THUMBNAIL_MARKER_WIDTH = 3
+
+
+def render_step_thumbnail(step: Step, max_size: tuple, zoom: bool = False) -> Image.Image:
+    """Construit la miniature d'une etape pour l'ecran de relecture, avec un
+    marqueur de clic a taille garantie (voir THUMBNAIL_MARKER_RADIUS/WIDTH
+    ci-dessus) plutot que de reduire un marqueur deja dessine en pleine
+    resolution comme le fait render_step_image (utilise lui pour l'export et
+    l'editeur de redaction, ou la taille du marqueur doit rester fidele a la
+    resolution reelle de la capture). Le marqueur est dessine EN DERNIER, sur
+    l'image DEJA reduite, pour que sa taille affichee ne depende jamais du
+    facteur de reduction de l'image source (trouvaille d'audit, dimension 16).
+    Leve les memes exceptions que render_step_image (OSError, ValueError) si
+    l'image brute est illisible - a l'appelant de les gerer."""
+    with Image.open(step.raw_image_path) as src:
+        img = src.convert("RGB").copy()
+
+    draw = ImageDraw.Draw(img)
+    for (x1, y1, x2, y2) in step.redactions:
+        left, right = sorted((x1, x2))
+        top, bottom = sorted((y1, y2))
+        draw.rectangle([left, top, right, bottom], fill=REDACTION_COLOR)
+
+    cx, cy = step.click_x, step.click_y
+    if zoom:
+        left, top, right, bottom = _zoomed_region_bounds(img.width, img.height, cx, cy)
+        img = img.crop((left, top, right, bottom))
+        cx, cy = cx - left, cy - top
+
+    orig_width = img.width
+    img.thumbnail(max_size)
+    scale = img.width / orig_width if orig_width else 1.0
+    cx, cy = cx * scale, cy * scale
+
+    draw = ImageDraw.Draw(img)
+    r = THUMBNAIL_MARKER_RADIUS
+    marker_color = RIGHT_CLICK_MARKER_COLOR if step.button == "right" else CLICK_MARKER_COLOR
+    draw.ellipse(
+        [cx - r, cy - r, cx + r, cy + r],
+        outline=marker_color,
+        width=THUMBNAIL_MARKER_WIDTH,
+    )
+    return img
 
 
 # ---------------------------------------------------------------------------
@@ -514,14 +649,34 @@ _WINDOWS_RESERVED_NAMES = frozenset({
 })
 
 
+# Windows limite historiquement un chemin COMPLET (dossier + nom + extension)
+# a 260 caracteres (MAX_PATH) - aucune limite de longueur n'existe ailleurs
+# sur le titre du guide ou les descriptions d'etape saisis librement (trouvaille
+# d'audit, dimension 31) : un titre demesurement long, combine a une
+# destination d'export deja profonde, pourrait s'en approcher et produire une
+# erreur d'ecriture peu claire plutot qu'un message explicite. 100 caracteres
+# laisse une marge tres confortable pour le reste du chemin (dossier de
+# destination, extension) tout en restant largement suffisant pour identifier
+# un guide.
+_MAX_FILENAME_LENGTH = 100
+
+
 def sanitize_filename(name: str, fallback: str = "guide") -> str:
     """Nettoie un titre de guide pour qu'il soit utilisable tel quel comme nom
     de fichier ou de dossier Windows (le titre est saisi librement par
     l'utilisateur et peut contenir des caracteres interdits comme '/' ou ':',
-    ou coincider avec un nom de peripherique reserve comme "CON")."""
+    ou coincider avec un nom de peripherique reserve comme "CON"), et le
+    tronque a une longueur raisonnable (voir _MAX_FILENAME_LENGTH)."""
     cleaned = _INVALID_FILENAME_CHARS.sub("_", name).strip(" .")
     if not cleaned:
         return fallback
+    if len(cleaned) > _MAX_FILENAME_LENGTH:
+        # Re-nettoyage apres troncature : couper au milieu du nom peut
+        # laisser un espace ou un point en fin de chaine, egalement invalides
+        # comme dernier caractere d'un nom de fichier/dossier Windows.
+        cleaned = cleaned[:_MAX_FILENAME_LENGTH].strip(" .")
+        if not cleaned:
+            return fallback
     if cleaned.upper() in _WINDOWS_RESERVED_NAMES:
         return f"{cleaned}_"
     return cleaned
