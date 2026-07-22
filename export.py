@@ -48,11 +48,12 @@ def export_html(steps: list, title: str, output_path: Path) -> None:
     for step in steps:
         png_bytes = _step_to_png_bytes(step, zoom=step.zoom)
         b64 = base64.b64encode(png_bytes).decode("ascii")
+        alt_text = html_escape(step.display_description())
         sections.append(
             "<section class=\"step\">"
             f"<h2>Etape {step.index}</h2>"
             f"<p>{html_escape(step.display_description())}</p>"
-            f"<img src=\"data:image/png;base64,{b64}\" alt=\"Etape {step.index}\">"
+            f"<img src=\"data:image/png;base64,{b64}\" alt=\"{alt_text}\">"
             "</section>"
         )
 
@@ -93,11 +94,12 @@ def export_markdown(steps: list, title: str, output_dir: Path) -> Path:
     for step in steps:
         image_name = f"etape-{step.index:03d}.png"
         (images_dir / image_name).write_bytes(_step_to_png_bytes(step, zoom=step.zoom))
+        alt_text = escape_markdown(step.display_description())
         lines.append(f"## Etape {step.index}")
         lines.append("")
         lines.append(escape_markdown(step.display_description()))
         lines.append("")
-        lines.append(f"![Etape {step.index}](images/{image_name})")
+        lines.append(f"![{alt_text}](images/{image_name})")
         lines.append("")
 
     md_path = output_dir / "guide.md"

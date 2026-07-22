@@ -100,6 +100,42 @@ class ExportTestCase(unittest.TestCase):
         content = out.read_text(encoding="utf-8")
         self.assertIn("Bloc-notes", content)  # description par defaut de l'etape 2
 
+    def test_export_html_uses_description_as_alt_text(self):
+        # L'attribut alt de chaque image doit refleter la description reelle
+        # de l'etape (accessibilite/indexation), pas un texte generique
+        # "Etape N" sans rapport avec le contenu visuel (bug trouve a l'audit).
+        out = self.tmp / "guide.html"
+        exp.export_html(self.steps, "Titre", out)
+        content = out.read_text(encoding="utf-8")
+        self.assertIn('alt="Ouvrez le fichier"', content)
+        self.assertNotIn('alt="Etape 1"', content)
+        # L'etape 2 n'a pas de description personnalisee : l'alt doit utiliser
+        # la description par defaut (nom de fenetre), pas non plus "Etape 2".
+        self.assertNotIn('alt="Etape 2"', content)
+
+    def test_export_html_escapes_alt_text(self):
+        self.steps[0].description = '"><script>alert(1)</script>'
+        out = self.tmp / "guide.html"
+        exp.export_html(self.steps, "Titre", out)
+        content = out.read_text(encoding="utf-8")
+        self.assertNotIn('alt="">', content)
+        self.assertIn("&quot;&gt;&lt;script&gt;", content)
+
+    def test_export_markdown_uses_description_as_alt_text(self):
+        out_dir = self.tmp / "export_md_alt"
+        md_path = exp.export_markdown(self.steps, "Titre", out_dir)
+        content = md_path.read_text(encoding="utf-8")
+        self.assertIn("![Ouvrez le fichier](images/etape-001.png)", content)
+        self.assertNotIn("[Etape 1]", content)
+        self.assertNotIn("[Etape 2]", content)
+
+    def test_export_markdown_escapes_alt_text(self):
+        self.steps[0].description = "Cliquez sur *Fichier* [ici]"
+        out_dir = self.tmp / "export_md_alt2"
+        md_path = exp.export_markdown(self.steps, "Titre", out_dir)
+        content = md_path.read_text(encoding="utf-8")
+        self.assertIn("![Cliquez sur \\*Fichier\\* \\[ici\\]]", content)
+
     def test_export_html_respects_per_step_zoom_flag(self):
         # Une image assez grande pour qu'un recadrage zoome soit vraiment
         # plus petit que l'image complete (voir capture._crop_zoomed_region,

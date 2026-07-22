@@ -164,6 +164,30 @@ l'exécuter, par exemple en le soumettant à
 [VirusTotal](https://www.virustotal.com/) (analyse par plusieurs dizaines de
 moteurs antivirus) plutôt que de vous fier à un seul verdict.
 
+### Le clic droit ne capture pas le menu contextuel qu'il ouvre
+
+Chaque capture d'écran est prise de façon synchrone, au moment précis de
+l'appui du clic — avant que le système n'ait eu le temps d'afficher un
+éventuel menu contextuel. Une étape « Cliquez droit dans ... » n'affichera
+donc jamais, sur sa propre image, le menu qui s'ouvre en réponse à ce clic :
+seulement l'état de l'écran juste avant. L'étape suivante (le clic sur une
+entrée du menu) capture bien ce menu déjà ouvert à ce moment-là — seule
+l'image du clic droit lui-même n'en montre pas le résultat. C'est la
+contrepartie assumée du principe « la capture reste solidaire de l'instant
+exact du clic », appliqué de façon identique aux deux boutons.
+
+### Fidélité réduite de l'export PDF hors des caractères Latin-1
+
+L'export **PDF** dessine le titre et la description de chaque étape
+directement sur l'image de la page, sans police externe embarquée : les
+caractères hors du jeu Latin-1 (CJK, cyrillique, arabe, grec, certains
+guillemets typographiques, emoji...) y sont remplacés par `?`. Cette limite
+ne concerne que le format PDF — les exports **HTML** et **Markdown**
+encodent le texte en UTF-8 sans restriction et restent parfaitement fidèles,
+quel que soit l'alphabet concerné (titre de fenêtre capturé automatiquement
+ou description saisie manuellement). Si votre guide contient du texte hors
+Latin-1, privilégiez l'export HTML ou Markdown.
+
 ## Créer un exécutable autonome (.exe)
 
 Pour distribuer l'outil sans que le destinataire ait besoin d'installer
