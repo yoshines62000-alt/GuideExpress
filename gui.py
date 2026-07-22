@@ -20,7 +20,7 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 from PIL import Image, ImageDraw, ImageTk
 
 DONATE_URL = "https://ko-fi.com/yoshines62000"
-APP_VERSION = "1.1.12"
+APP_VERSION = "1.1.13"
 UPDATE_REPO = "yoshines62000-alt/GuideExpress"
 RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 
