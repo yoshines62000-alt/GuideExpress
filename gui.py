@@ -44,6 +44,10 @@ EDITOR_MAX_SIZE = (980, 680)
 # a la boucle d'evenements Tk pendant la construction d'une session volumineuse
 # (voir _build_review_view, trouvaille d'audit dimension 9).
 _REVIEW_BUILD_PROGRESS_EVERY = 20
+# Meme motif pour _list_sessions (trouvaille d'audit du 2026-07-28, dimension
+# Moyenne) : rendre la main a la boucle d'evenements Tk toutes les N sessions
+# scannees, plutot que de geler l'interface du debut a la fin.
+_SESSIONS_SCAN_PROGRESS_EVERY = 5
 
 _logging_configured = False
 
@@ -321,17 +325,36 @@ class GuideExpressApp(tk.Tk):
     # Gestion des sessions enregistrees (captures brutes sur le disque)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _list_sessions():
+    def _list_sessions(self):
+        # Curseur sablier + update_idletasks() periodique (meme motif que
+        # _build_review_view, trouvaille d'audit dimension 9) : ce scan fait
+        # un rglob() + stat() par fichier de CHAQUE session sur le disque,
+        # synchrone sur le thread principal Tk. Sur un gros dossier de
+        # sessions (nombreuses sessions non purgees - voir le message
+        # d'avertissement de _build_sessions_view, GuideExpress ne les
+        # supprime jamais tout seul), ce scan gelait totalement l'interface
+        # sans aucun signal ni pompe de messages Windows pendant toute sa
+        # duree (10.1s mesures dans l'audit original sur un dossier de
+        # sessions volumineux), risquant le meme forcage de fermeture par
+        # reflexe utilisateur ("Ne repond pas") que _build_review_view avant
+        # son propre correctif (trouvaille d'audit du 2026-07-28, dimension
+        # Moyenne). N'est PAS un @staticmethod : self.configure(cursor=...)
+        # a besoin d'un widget Tk reel.
         if not SESSIONS_DIR.exists():
             return []
         sessions = []
-        for entry in sorted(SESSIONS_DIR.iterdir(), reverse=True):
-            if not entry.is_dir():
-                continue
-            files = [f for f in entry.rglob("*") if f.is_file()]
-            size = sum(f.stat().st_size for f in files)
-            sessions.append((entry, len(files), size))
+        try:
+            self.configure(cursor="watch")
+            self.update_idletasks()
+            for i, entry in enumerate(sorted(SESSIONS_DIR.iterdir(), reverse=True), start=1):
+                if entry.is_dir():
+                    files = [f for f in entry.rglob("*") if f.is_file()]
+                    size = sum(f.stat().st_size for f in files)
+                    sessions.append((entry, len(files), size))
+                if i % _SESSIONS_SCAN_PROGRESS_EVERY == 0:
+                    self.update_idletasks()
+        finally:
+            self.configure(cursor="")
         return sessions
 
     def _build_sessions_view(self):
@@ -1249,12 +1272,54 @@ class GuideExpressApp(tk.Tk):
         generale."""
         if not hasattr(self, "_undo_frame"):
             return
+        if self._last_deleted is not None:
+            # Une suppression etait deja en attente d'annulation : cette
+            # nouvelle suppression la remplace (voir docstring ci-dessus), ce
+            # qui la rend definitive des maintenant - c'est donc ICI, et pas
+            # seulement a l'expiration du minuteur (_expire_undo_bar), que
+            # son fichier image brut doit etre efface pour de bon.
+            self._finalize_deleted_step_file(self._last_deleted[0])
         self._last_deleted = (step, index)
         self._undo_status_var.set(f"Etape {step.index} supprimee.")
         self._undo_frame.pack(side="left", padx=(12, 0))
         if self._undo_after_id is not None:
             self.after_cancel(self._undo_after_id)
-        self._undo_after_id = self.after(8000, self._hide_undo_bar)
+        self._undo_after_id = self.after(8000, self._expire_undo_bar)
+
+    def _finalize_deleted_step_file(self, step):
+        """Efface reellement du disque le fichier image brut d'une etape
+        supprimee dont la fenetre d'annulation vient de se refermer -
+        JAMAIS avant (voir _expire_undo_bar et _show_undo_bar), pour que
+        "Annuler" puisse toujours restaurer une image intacte pendant les 8
+        secondes ou le bandeau reste affiche. Sans cette suppression
+        differee, les fichiers image bruts des etapes supprimees
+        s'accumulaient silencieusement sur le disque a chaque suppression,
+        pour toujours (bug trouve a l'audit). On verifie d'abord qu'AUCUNE
+        autre etape encore presente dans self.steps ne pointe vers le meme
+        fichier avant de l'effacer : duplicate_step fait volontairement
+        PARTAGER le meme raw_image_path entre une etape et sa copie (voir
+        son commentaire dans capture.py), donc supprimer l'une des deux ne
+        doit jamais casser la miniature de l'autre. missing_ok=True + le
+        meme OSError englobant que _finish_retake/_cancel_retake : un
+        fichier deja absent ou verrouille ne doit jamais faire echouer quoi
+        que ce soit ici, cette suppression est une simple opportunite de
+        nettoyage, pas une operation critique."""
+        if any(s.raw_image_path == step.raw_image_path for s in self.steps):
+            return
+        try:
+            step.raw_image_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _expire_undo_bar(self):
+        """Callback du minuteur de 8 secondes arme par _show_undo_bar : le
+        bandeau "Annuler" expire sans action de l'utilisateur, la
+        suppression en attente devient definitive. On efface maintenant le
+        fichier image brut correspondant (voir _finalize_deleted_step_file)
+        avant de faire disparaitre le bandeau."""
+        if self._last_deleted is not None:
+            self._finalize_deleted_step_file(self._last_deleted[0])
+        self._hide_undo_bar()
 
     def _hide_undo_bar(self):
         self._last_deleted = None

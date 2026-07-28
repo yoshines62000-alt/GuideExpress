@@ -44,6 +44,14 @@ Dimensions du Backlog de l'audit du 2026-07-22 traitees ici (passe suivante) :
   taille (resizable(False, False)), coherent avec le HUD.
 - dimension 32 (Mineure) : un bandeau "Annuler" temporaire doit permettre de
   restaurer une etape supprimee par erreur, a sa position d'origine.
+
+Trouvaille de l'audit du 2026-07-28 (Elevee) : supprimer une etape ne
+supprimait jamais le fichier image brut correspondant sur le disque - les
+fichiers image orphelins s'accumulaient silencieusement a chaque suppression.
+Corrige en effacant reellement le fichier, mais seulement une fois la
+suppression devenue definitive (bandeau "Annuler" expire ou remplace par une
+suppression plus recente), jamais avant : sinon "Annuler" restaurerait une
+etape dont l'image aurait deja disparu du disque.
 """
 
 import json
@@ -522,6 +530,62 @@ class ReviewBuildResponsivenessTestCase(_RealAppTestCase):
         self.assertEqual(str(self.app.cget("cursor")), "")
 
 
+@unittest.skipUnless(_TK_AVAILABLE, "Aucun affichage Tk disponible dans cet environnement.")
+class ListSessionsResponsivenessTestCase(_RealAppTestCase):
+    """Trouvaille d'audit du 2026-07-28 (Moyenne) : _list_sessions() (appelee
+    par _build_sessions_view et _delete_old_sessions) scanne chaque session
+    sur le disque - rglob() + stat() par fichier - de facon synchrone, sans
+    aucun signal ni pompe de messages Windows pendant tout le scan (10.1s de
+    gel mesures dans l'audit original sur un dossier de sessions volumineux -
+    au-dela du seuil "Ne repond pas" typique de Windows, ~5s), exactement le
+    meme symptome que _build_review_view avant son propre correctif (voir
+    ReviewBuildResponsivenessTestCase ci-dessus). Corrige avec le meme motif :
+    curseur sablier + update_idletasks() toutes les
+    _SESSIONS_SCAN_PROGRESS_EVERY sessions."""
+
+    def test_list_sessions_yields_to_the_event_loop_periodically(self):
+        # Au moins 2 points de controle attendus pendant le scan.
+        session_count = 2 * gui_mod._SESSIONS_SCAN_PROGRESS_EVERY + 3
+        for i in range(session_count):
+            session_dir = self.tmp / "sessions" / f"2026010{i:04d}-000000"
+            session_dir.mkdir(parents=True)
+            (session_dir / "step_0001_raw.png").write_bytes(_valid_png_bytes((4, 4)))
+
+        calls = []
+        original_update_idletasks = self.app.update_idletasks
+
+        def _spy(*args, **kwargs):
+            calls.append(1)
+            return original_update_idletasks(*args, **kwargs)
+
+        self.app.update_idletasks = _spy
+        try:
+            sessions = self.app._list_sessions()
+        finally:
+            del self.app.update_idletasks  # restaure la resolution normale via la classe
+
+        self.assertEqual(len(sessions), session_count)
+        # 1 appel avant la boucle + au moins 2 points de controle pendant :
+        # au moins 3 rendus-la-main a la boucle d'evenements Tk pendant le
+        # scan, plutot qu'un seul gel total du debut a la fin.
+        self.assertGreaterEqual(calls.count(1), 3)
+        # Le curseur sablier doit avoir ete restaure a la fin (jamais laisse
+        # actif, meme si une erreur avait interrompu le scan - voir le
+        # try/finally du correctif).
+        self.assertEqual(str(self.app.cget("cursor")), "")
+
+    def test_list_sessions_still_used_transparently_by_its_two_callers(self):
+        # _list_sessions() n'est plus un @staticmethod (self.configure(cursor=
+        # ...) a besoin d'un widget Tk reel) : verrouille que ses deux
+        # appelants existants (_build_sessions_view, _delete_old_sessions)
+        # continuent de fonctionner tels quels via self._list_sessions().
+        session_dir = self.tmp / "sessions" / "20260101-000000"
+        session_dir.mkdir(parents=True)
+        (session_dir / "step_0001_raw.png").write_bytes(_valid_png_bytes((4, 4)))
+
+        self.app._build_sessions_view()  # ne doit pas lever (AttributeError sur un staticmethod mal appele, etc.)
+
+
 class DpiAwarenessTestCase(unittest.TestCase):
     """Dimension 7 de l'audit : le processus doit etre rendu explicitement
     Per-Monitor V2 DPI Aware AVANT toute fenetre Tk - sans quoi le hook bas
@@ -669,6 +733,93 @@ class RedactionEditorTestCase(_RealAppTestCase):
 
 
 @unittest.skipUnless(_TK_AVAILABLE, "Aucun affichage Tk disponible dans cet environnement.")
+class RedactionDragTestCase(_RealAppTestCase):
+    """Trouvaille d'audit du 2026-07-28 (Moyenne) : aucun test ne parcourait
+    le vrai chemin de dessin d'une redaction (glisser-deposer sur le canvas de
+    _open_redaction_editor - ButtonPress-1/B1-Motion/ButtonRelease-1, voir
+    on_press/on_drag/on_release). Les tests existants de cette classe ne
+    verifiaient que la persistance d'une redaction deja presente dans
+    step.redactions (ajoutee directement par le test, sans jamais passer par
+    le canvas), pas le tracage lui-meme."""
+
+    def _open_editor(self):
+        session_dir = self.tmp / "sessions" / "20260101-190000"
+        session_dir.mkdir(parents=True)
+        step = self._make_step(1, session_dir)
+        self.app.session_dir = session_dir
+        self.app.steps = [step]
+        self.app._build_review_view()
+        self.app._open_redaction_editor(step)
+        editor = self.app.grab_current()
+        self.assertIsNotNone(editor, "l'editeur de redaction n'a pas pris le grab modal attendu")
+        return step, editor
+
+    @staticmethod
+    def _find_canvas(editor):
+        for child in editor.winfo_children():
+            if isinstance(child, gui_mod.tk.Canvas):
+                return child
+        return None
+
+    def test_full_drag_on_canvas_appends_a_scaled_redaction(self):
+        step, editor = self._open_editor()
+        self.addCleanup(lambda: editor.destroy() if editor.winfo_exists() else None)
+
+        canvas = self._find_canvas(editor)
+        self.assertIsNotNone(canvas, "le canvas de l'editeur de redaction est introuvable")
+        self.assertEqual(step.redactions, [])
+        # Un widget non mappe (fenetre pas encore affichee a l'ecran) ignore
+        # silencieusement les evenements pointeur generes par event_generate -
+        # sans ce update() prealable, aucun des ButtonPress/Motion/
+        # ButtonRelease ci-dessous n'atteindrait le canvas.
+        self.app.update()
+
+        # Meme calcul d'echelle que _open_redaction_editor (image brute
+        # plafonnee a EDITOR_MAX_SIZE pour l'affichage) : reproduit ici pour
+        # verifier que les coordonnees stockees sont bien celles de l'image
+        # BRUTE (utilisees a l'export), pas celles, plus petites, du canvas.
+        full_img = cap.render_step_image(step, zoom=False)
+        display_img = full_img.copy()
+        display_img.thumbnail(gui_mod.EDITOR_MAX_SIZE)
+        scale_x = full_img.width / display_img.width
+        scale_y = full_img.height / display_img.height
+
+        x0, y0, x1, y1 = 15, 15, 70, 65
+        # Glisser-deposer complet, comme un vrai utilisateur : enfoncement,
+        # deplacement(s) pendant le glissement, puis relachement - reproduit
+        # sur canvas.bind("<ButtonPress-1>"/"<B1-Motion>"/"<ButtonRelease-1>")
+        # dans _open_redaction_editor.
+        canvas.event_generate("<ButtonPress-1>", x=x0, y=y0)
+        canvas.event_generate("<B1-Motion>", x=(x0 + x1) // 2, y=(y0 + y1) // 2)
+        canvas.event_generate("<B1-Motion>", x=x1, y=y1)
+        canvas.event_generate("<ButtonRelease-1>", x=x1, y=y1)
+        self.app.update()
+
+        self.assertEqual(len(step.redactions), 1, "le glisser-depose complet aurait du ajouter une redaction")
+        expected = (
+            int(x0 * scale_x), int(y0 * scale_y),
+            int(x1 * scale_x), int(y1 * scale_y),
+        )
+        self.assertEqual(step.redactions[0], expected)
+
+    def test_tiny_drag_below_threshold_is_ignored(self):
+        # Miroir du garde-fou de on_release (abs(x1-x0) < 3 ou abs(y1-y0) <
+        # 3) : un simple clic (ou tremblement de souris) sans glissement reel
+        # ne doit pas creer de redaction vide/degenerescente.
+        step, editor = self._open_editor()
+        self.addCleanup(lambda: editor.destroy() if editor.winfo_exists() else None)
+        canvas = self._find_canvas(editor)
+        self.assertIsNotNone(canvas)
+        self.app.update()  # voir le commentaire equivalent ci-dessus
+
+        canvas.event_generate("<ButtonPress-1>", x=20, y=20)
+        canvas.event_generate("<ButtonRelease-1>", x=21, y=21)
+        self.app.update()
+
+        self.assertEqual(step.redactions, [])
+
+
+@unittest.skipUnless(_TK_AVAILABLE, "Aucun affichage Tk disponible dans cet environnement.")
 class DeleteUndoTestCase(_RealAppTestCase):
     """Dimension 32 de l'audit (Backlog) : un bandeau "Annuler" temporaire
     doit permettre de restaurer une etape supprimee par erreur, a sa position
@@ -781,6 +932,99 @@ class DeleteUndoTestCase(_RealAppTestCase):
 
         self.app._undo_delete()  # ne doit pas lever, ni rien changer
         self.assertEqual(len(self.app.steps), 1)
+
+
+@unittest.skipUnless(_TK_AVAILABLE, "Aucun affichage Tk disponible dans cet environnement.")
+class DeleteOrphanRawImageTestCase(_RealAppTestCase):
+    """Trouvaille de l'audit du 2026-07-28 (Elevee) : supprimer une etape ne
+    supprimait jamais le fichier image brut correspondant sur le disque, qui
+    restait donc orphelin pour toujours. Ces tests verrouillent le
+    correctif ET sa contrainte principale : le fichier ne doit disparaitre
+    qu'une fois la suppression devenue definitive (bandeau "Annuler" expire
+    ou remplace), jamais avant - voir _finalize_deleted_step_file,
+    _expire_undo_bar et _show_undo_bar dans gui.py."""
+
+    def setUp(self):
+        super().setUp()
+        self.mocks["askyesno"].return_value = True  # confirme systematiquement la suppression
+
+    def test_expired_undo_bar_deletes_the_orphaned_raw_image_file(self):
+        session_dir = self.tmp / "sessions" / "20260101-190600"
+        session_dir.mkdir(parents=True)
+        steps = [self._make_step(i, session_dir) for i in (1, 2)]
+        self.app.session_dir = session_dir
+        self.app.steps = steps
+        self.app._build_review_view()
+
+        deleted = steps[0]
+        raw_path = deleted.raw_image_path
+        self.app._delete(deleted)
+
+        # Encore dans la fenetre d'annulation : le fichier doit rester
+        # intact (meme garantie que DeleteUndoTestCase).
+        self.assertTrue(raw_path.exists())
+
+        # Simule l'expiration du minuteur de 8 secondes (voir
+        # _show_undo_bar) sans attendre pour de vrai.
+        self.app._expire_undo_bar()
+
+        self.assertFalse(raw_path.exists())
+        self.assertIsNone(self.app._last_deleted)
+
+    def test_a_second_deletion_before_undo_deletes_the_first_pending_raw_image(self):
+        session_dir = self.tmp / "sessions" / "20260101-190700"
+        session_dir.mkdir(parents=True)
+        steps = [self._make_step(i, session_dir) for i in (1, 2, 3)]
+        self.app.session_dir = session_dir
+        self.app.steps = list(steps)
+        self.app._build_review_view()
+
+        first_raw_path = steps[0].raw_image_path
+        second_raw_path = steps[1].raw_image_path
+
+        self.app._delete(steps[0])
+        self.app._delete(steps[1])
+
+        # La suppression de steps[0] n'est plus annulable (remplacee par
+        # celle de steps[1], voir _show_undo_bar) : son fichier est deja
+        # efface pour de bon, meme si personne n'a attendu l'expiration.
+        self.assertFalse(first_raw_path.exists())
+        # steps[1] reste, lui, dans la fenetre d'annulation.
+        self.assertTrue(second_raw_path.exists())
+
+        self.app._undo_delete()
+        self.assertTrue(second_raw_path.exists())
+
+    def test_deleting_one_of_two_steps_sharing_the_same_raw_image_keeps_the_file(self):
+        # duplicate_step (capture.py) fait volontairement partager le meme
+        # raw_image_path entre une etape et sa copie : supprimer l'une des
+        # deux ne doit jamais casser la miniature de l'autre, encore
+        # presente.
+        session_dir = self.tmp / "sessions" / "20260101-190800"
+        session_dir.mkdir(parents=True)
+        original = self._make_step(1, session_dir)
+        self.app.session_dir = session_dir
+        self.app.steps = [original]
+        self.app._build_review_view()
+
+        self.app._duplicate(original)
+        self.assertEqual(len(self.app.steps), 2)
+        copy = self.app.steps[1]
+        self.assertEqual(copy.raw_image_path, original.raw_image_path)
+
+        self.app._delete(copy)
+        self.app._expire_undo_bar()
+
+        # Le fichier est toujours reference par `original`, encore present
+        # dans self.steps : il ne doit pas avoir ete efface.
+        self.assertTrue(original.raw_image_path.exists())
+
+        self.app._delete(original)
+        self.app._expire_undo_bar()
+
+        # Plus aucune etape ne le reference desormais : le fichier doit
+        # cette fois avoir ete efface pour de bon.
+        self.assertFalse(original.raw_image_path.exists())
 
 
 if __name__ == "__main__":

@@ -192,6 +192,105 @@ class RecorderTestCase(RecorderTestBase):
                 fresh.start()
 
 
+class HookWatchdogTestCase(RecorderTestBase):
+    """Trouvaille d'audit du 2026-07-28 (Moyenne) : le hook bas niveau pynput
+    (WH_MOUSE_LL) peut etre desinstalle silencieusement par Windows si le
+    callback (_on_click, voir _grab_screenshot) met trop de temps a repondre
+    (LowLevelHooksTimeout) - voir la docstring de Recorder, paragraphe
+    "Risque residuel accepte". Ces tests verrouillent le watchdog qui detecte
+    le thread pynput mort et le reinstalle, sans jamais accrocher la vraie
+    souris (mouse.Listener.start reste mocke, comme partout ailleurs dans ce
+    fichier - voir le docstring de module)."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.recorder = Recorder(self.tmp / "session")
+        self.addCleanup(self.recorder.shutdown)
+
+    def _drain_errors(self):
+        errors = []
+        while not self.recorder.capture_errors.empty():
+            errors.append(self.recorder.capture_errors.get())
+        return errors
+
+    def test_check_hook_health_reinstalls_a_dead_listener_while_active(self):
+        self.recorder._active = True
+        dead_listener = mock.Mock()
+        dead_listener.is_alive.return_value = False
+        self.recorder._listener = dead_listener
+
+        with mock.patch.object(mouse.Listener, "start"):
+            reinstalled = self.recorder._check_hook_health()
+
+        self.assertTrue(reinstalled)
+        self.assertIsNot(self.recorder._listener, dead_listener)
+        self.assertIsInstance(self.recorder._listener, mouse.Listener)
+        errors = self._drain_errors()
+        self.assertEqual(len(errors), 1)
+        self.assertIn("reinstallation automatique", errors[0])
+
+    def test_check_hook_health_leaves_a_live_listener_untouched(self):
+        self.recorder._active = True
+        live_listener = mock.Mock()
+        live_listener.is_alive.return_value = True
+        self.recorder._listener = live_listener
+
+        reinstalled = self.recorder._check_hook_health()
+
+        self.assertFalse(reinstalled)
+        self.assertIs(self.recorder._listener, live_listener)
+        self.assertEqual(self._drain_errors(), [])
+
+    def test_check_hook_health_does_nothing_once_inactive(self):
+        # stop()/shutdown() deja appele (ou jamais demarre) : un thread mort
+        # n'est pas anormal si l'enregistrement n'est de toute facon plus
+        # cense tourner - ne doit rien reinstaller ni rien signaler.
+        self.recorder._active = False
+        dead_listener = mock.Mock()
+        dead_listener.is_alive.return_value = False
+        self.recorder._listener = dead_listener
+
+        reinstalled = self.recorder._check_hook_health()
+
+        self.assertFalse(reinstalled)
+        self.assertIs(self.recorder._listener, dead_listener)
+        self.assertEqual(self._drain_errors(), [])
+
+    def test_check_hook_health_reports_reinstallation_failure_without_raising(self):
+        self.recorder._active = True
+        dead_listener = mock.Mock()
+        dead_listener.is_alive.return_value = False
+        self.recorder._listener = dead_listener
+
+        with mock.patch.object(mouse.Listener, "start", side_effect=OSError("hook refuse")):
+            reinstalled = self.recorder._check_hook_health()  # ne doit jamais lever
+
+        self.assertTrue(reinstalled)
+        errors = self._drain_errors()
+        self.assertEqual(len(errors), 2)
+        self.assertIn("reinstallation automatique", errors[0])
+        self.assertIn("Echec de la reinstallation", errors[1])
+
+    def test_start_launches_a_watchdog_thread_and_stop_joins_it(self):
+        with mock.patch.object(mouse.Listener, "start"):
+            self.recorder.start()
+        self.assertIsNotNone(self.recorder._watchdog_thread)
+        self.assertTrue(self.recorder._watchdog_thread.is_alive())
+
+        self.recorder.stop()
+        self.assertFalse(self.recorder._watchdog_thread.is_alive())
+
+    def test_failed_start_does_not_launch_a_watchdog_thread(self):
+        # Miroir de test_start_propagates_listener_installation_failure :
+        # aucun watchdog ne doit tourner pour un Recorder dont le hook n'a
+        # jamais reellement ete installe.
+        with mock.patch.object(mouse.Listener, "start", side_effect=OSError("hook refuse")):
+            with self.assertRaises(OSError):
+                self.recorder.start()
+        self.assertIsNone(self.recorder._watchdog_thread)
+
+
 class VirtualScreenOffsetTestCase(RecorderTestBase):
     """Sur une configuration multi-ecrans ou un moniteur secondaire est place
     a gauche/au-dessus du principal, l'origine du bureau virtuel Windows

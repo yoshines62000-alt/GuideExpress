@@ -21,6 +21,11 @@ from pynput import mouse
 
 from capture import get_window_at_point, get_window_text
 
+# Intervalle (secondes) entre deux verifications de sante du hook bas niveau
+# pynput (voir _watchdog_loop / _check_hook_health, trouvaille d'audit du
+# 2026-07-28, dimension Moyenne).
+_HOOK_WATCHDOG_INTERVAL_S = 2.0
+
 
 def _grab_screenshot():
     """Capture l'ecran (tous les moniteurs si possible). Le clic peut avoir
@@ -100,7 +105,30 @@ class Recorder:
     moment exact de la capture doit rester solidaire de celui du clic. La
     deporter vers le thread d'ecriture changerait ce qui est effectivement
     capture (l'ecran au moment ou le thread traite la file, potentiellement
-    plus tard si elle a du retard, plutot qu'au moment reel du clic)."""
+    plus tard si elle a du retard, plutot qu'au moment reel du clic).
+
+    Risque residuel accepte (trouvaille d'audit du 2026-07-28, dimension
+    Moyenne) : meme HWND-only, ImageGrab.grab() reste un appel Win32 dont la
+    duree n'est pas bornee par ce code (charge disque/GDI de la machine,
+    pilote graphique lent, machine virtuelle...). Si ce callback depasse le
+    delai impose par la cle de registre LowLevelHooksTimeout (5s par defaut
+    sous Windows), le systeme peut soit ignorer une fois le retour du hook,
+    soit le DESINSTALLER SILENCIEUSEMENT de la chaine WH_MOUSE_LL - sans
+    exception, sans evenement, sans aucun signal cote pynput/Python : les
+    clics suivants de l'utilisateur ne generent alors plus AUCUNE etape,
+    jusqu'au redemarrage de l'enregistrement. Une refonte complete (deporter
+    aussi la capture d'ecran, au prix de perdre la synchronisation exacte
+    avec l'instant du clic - voir paragraphe precedent) a ete jugee
+    disproportionnee pour ce risque residuel. A la place, un watchdog dedie
+    (_watchdog_loop / _check_hook_health, demarre par start(), arrete par
+    stop()/shutdown()) verifie periodiquement que le thread d'ecoute pynput
+    est toujours vivant et le reinstalle automatiquement si besoin - la
+    seule detection fiable disponible sans API Win32 dediee pour interroger
+    l'etat d'un HHOOK a posteriori (cas non couvert : hook desinstalle par
+    Windows alors que le thread pynput reste techniquement vivant en
+    attente de messages qui ne viendront plus - detection non garantie a
+    100%, mais reduit significativement la fenetre d'exposition par rapport
+    a une absence totale de mecanisme de reprise)."""
 
     def __init__(self, session_dir: Path, excluded_hwnds: frozenset = frozenset()):
         self.session_dir = session_dir
@@ -119,6 +147,11 @@ class Recorder:
         self.excluded_hwnds = frozenset(excluded_hwnds)
         self._writer_thread = threading.Thread(target=self._writer_loop, daemon=True)
         self._writer_thread.start()
+        # Watchdog du hook bas niveau (voir docstring de la classe,
+        # paragraphe "Risque residuel accepte") : _watchdog_thread reste None
+        # tant que start() n'a jamais ete appele.
+        self._watchdog_thread = None
+        self._watchdog_stop = threading.Event()
 
     @property
     def is_active(self) -> bool:
@@ -135,8 +168,57 @@ class Recorder:
             return
         self._active = True
         self._paused = False
+        self._install_listener()
+        # Demarre le watchdog APRES l'installation reussie du hook (si
+        # _install_listener() leve, ex: hook refuse par l'OS/EDR - voir
+        # test_start_propagates_listener_installation_failure - aucun
+        # watchdog ne doit tourner pour un Recorder jamais reellement
+        # demarre).
+        self._watchdog_stop.clear()
+        if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
+            self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+            self._watchdog_thread.start()
+
+    def _install_listener(self) -> None:
         self._listener = mouse.Listener(on_click=self._on_click)
         self._listener.start()
+
+    def _watchdog_loop(self) -> None:
+        # Event.wait() renvoie True des que _watchdog_stop est signale (sortie
+        # immediate de la boucle a stop()/shutdown()), False s'il expire
+        # normalement (verification periodique) - voir _HOOK_WATCHDOG_INTERVAL_S.
+        while not self._watchdog_stop.wait(_HOOK_WATCHDOG_INTERVAL_S):
+            self._check_hook_health()
+
+    def _check_hook_health(self) -> bool:
+        """Detecte si le thread d'ecoute pynput (hook bas niveau) s'est
+        arrete de facon inattendue et le reinstalle si besoin. Renvoie True
+        si une reinstallation a eu lieu (utilise directement par les tests,
+        sans dependre du minuteur reel du watchdog - voir tests/test_recorder.py).
+
+        Limite assumee (voir docstring de la classe) : ne detecte que la mort
+        du THREAD pynput, pas un hook silencieusement retire de la chaine
+        Windows alors que le thread pynput continue de tourner sans plus
+        jamais recevoir de message - aucune API Win32 ne permet d'interroger
+        cet etat a posteriori."""
+        if not self._active:
+            return False
+        listener = self._listener
+        if listener is not None and listener.is_alive():
+            return False
+        self.capture_errors.put(
+            "Le recepteur de clics souris s'est arrete de facon inattendue "
+            "(hook bas niveau probablement desinstalle par Windows apres un "
+            "delai de reponse trop long) ; reinstallation automatique en cours."
+        )
+        try:
+            self._install_listener()
+        except Exception as exc:  # noqa: BLE001 - le watchdog ne doit jamais
+            # mourir silencieusement d'un echec de reinstallation : sans ce
+            # filet, un prochain echec de l'OS laisserait l'enregistrement
+            # definitivement sourd aux clics sans aucun diagnostic possible.
+            self.capture_errors.put(f"Echec de la reinstallation du recepteur de clics : {exc}")
+        return True
 
     def pause(self) -> None:
         """Suspend temporairement la capture des clics sans arreter
@@ -154,9 +236,16 @@ class Recorder:
     def stop(self) -> None:
         self._active = False
         self._paused = False
+        # Signale l'arret AVANT de couper le listener : _check_hook_health()
+        # relit self._active en premier et renonce immediatement si False,
+        # ce qui evite qu'un cycle du watchdog en cours reinstalle un nouveau
+        # hook juste apres cet arret volontaire.
+        self._watchdog_stop.set()
         if self._listener is not None:
             self._listener.stop()
             self._listener = None
+        if self._watchdog_thread is not None and self._watchdog_thread is not threading.current_thread():
+            self._watchdog_thread.join(timeout=_HOOK_WATCHDOG_INTERVAL_S + 1.0)
 
     def wait_for_pending_saves(self, timeout: float = 8.0) -> bool:
         """Attend que toutes les captures encore en attente d'ecriture disque
@@ -209,6 +298,19 @@ class Recorder:
                 return  # clic sur notre propre fenetre (ex: bouton Arreter) : ignore
             self._counter += 1
             idx = self._counter
+            # ATTENTION - risque LowLevelHooksTimeout (trouvaille d'audit du
+            # 2026-07-28, dimension Moyenne) : ImageGrab.grab() ci-dessous
+            # s'execute SYNCHRONE dans le callback du hook WH_MOUSE_LL
+            # (voir la docstring de la classe, paragraphe "Risque residuel
+            # accepte", pour la justification de ce choix et ses limites). Si
+            # cet appel Win32 depasse le delai LowLevelHooksTimeout du
+            # registre (5s par defaut), Windows peut desinstaller le hook
+            # SANS LA MOINDRE exception ni notification cote Python - les
+            # clics suivants ne generent alors plus aucune etape. Mitige (pas
+            # elimine) par le watchdog _watchdog_loop/_check_hook_health, qui
+            # reinstalle un nouveau hook des que le thread pynput est detecte
+            # mort - ne PAS retirer ce watchdog sans le remplacer par un
+            # mecanisme au moins equivalent.
             screenshot = _grab_screenshot()
             origin_x, origin_y = _virtual_screen_origin()
         except Exception as exc:  # noqa: BLE001 - callback de hook systeme :
