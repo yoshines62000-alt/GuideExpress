@@ -24,6 +24,8 @@ APP_VERSION = "1.1.17"
 UPDATE_REPO = "yoshines62000-alt/GuideExpress"
 RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 
+import opl_theme
+import opl_contact
 import update_checker
 from capture import (
     Step, render_step_image, render_step_thumbnail, move_step, move_step_to, delete_step,
@@ -161,6 +163,7 @@ class GuideExpressApp(tk.Tk):
     def __init__(self):
         _configure_logging()
         super().__init__()
+        opl_theme.apply(self, "GuideExpress")
         self.title("GuideExpress - Guides pas-a-pas")
         # 900x560 (au lieu de 760x560) : a 760px, meme repartis sur deux
         # rangees, les boutons "Rediger" et "Supprimer" de chaque carte
@@ -222,6 +225,7 @@ class GuideExpressApp(tk.Tk):
         # deroutante qu'un simple no-op si jamais un appel y accedait tot).
         self._last_deleted = None
         self._undo_after_id = None
+        opl_theme.entete(self, "GuideExpress", "Guides pas-a-pas", on_contact=lambda: opl_contact.ouvrir(self, app="GuideExpress", version=APP_VERSION)).pack(fill="x", side="top")
         self._container = ttk.Frame(self)
         self._container.pack(fill="both", expand=True)
 
@@ -305,7 +309,7 @@ class GuideExpressApp(tk.Tk):
         ttk.Label(frame, text="Titre du guide :").pack(anchor="w")
         ttk.Entry(frame, textvariable=self.title_var, width=50).pack(anchor="w", pady=(2, 20))
 
-        ttk.Button(frame, text="Demarrer l'enregistrement", command=self._start_recording).pack(anchor="w")
+        ttk.Button(frame, text="Demarrer l'enregistrement", command=self._start_recording, style="Accent.TButton").pack(anchor="w")
         ttk.Button(frame, text="Gerer les sessions enregistrees", command=self._build_sessions_view).pack(anchor="w", pady=(8, 0))
 
         privacy = ttk.LabelFrame(frame, text="Confidentialite", padding=12)
