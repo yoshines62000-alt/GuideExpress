@@ -186,6 +186,11 @@ class GuideExpressApp(tk.Tk):
         self._retake_recorder: Recorder | None = None
         self._retake_step_obj = None
         self.title_var = tk.StringVar(value="Mon guide")
+        # Affichage du marqueur de clic (anneau + halo dessine a la position du
+        # clic enregistre) sur les miniatures de relecture ET dans les exports.
+        # Active par defaut : le but de l'app est justement de montrer OU
+        # cliquer. Decocher permet d'exporter les captures brutes si besoin.
+        self._show_marker_var = tk.BooleanVar(value=True)
         # Cache des miniatures deja rendues, indexe par step.uid (identifiant
         # stable d'une etape, independant de sa position dans self.steps -
         # voir capture.Step.uid). Sans ce cache, _build_review_view devait
@@ -231,11 +236,11 @@ class GuideExpressApp(tk.Tk):
 
         bottom_bar = ttk.Frame(self)
         bottom_bar.pack(fill="x", side="bottom")
-        ttk.Label(bottom_bar, text=f"v{APP_VERSION}", foreground="#666").pack(side="left", padx=(8, 0), pady=4)
+        ttk.Label(bottom_bar, text=f"v{APP_VERSION}", foreground=opl_theme.couleur("texte_doux")).pack(side="left", padx=(8, 0), pady=4)
         self.update_status_var = tk.StringVar(value="")
-        self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground="#666")
+        self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground=opl_theme.couleur("texte_doux"))
         self.update_status_label.pack(side="left", padx=(6, 0), pady=4)
-        donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground="#0645AD", cursor="hand2")
+        donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground=opl_theme.couleur("lien"), cursor="hand2")
         donate_label.pack(side="right", padx=8, pady=4)
         donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
 
@@ -278,11 +283,11 @@ class GuideExpressApp(tk.Tk):
             return
         if status == "update_available":
             self.update_status_var.set(f"Mise a jour disponible : {tag} - Telecharger")
-            self.update_status_label.configure(foreground="#0645AD", cursor="hand2")
+            self.update_status_label.configure(foreground=opl_theme.couleur("lien"), cursor="hand2")
             self.update_status_label.bind("<Button-1>", lambda event: webbrowser.open(RELEASES_URL))
         elif status == "up_to_date":
             self.update_status_var.set("A jour")
-            self.update_status_label.configure(foreground="#1B7A1B", cursor="")
+            self.update_status_label.configure(foreground=opl_theme.couleur("succes"), cursor="")
         # "check_failed" (hors ligne, GitHub inaccessible...) : on ne
         # revendique rien plutot que d'afficher a tort "a jour".
 
@@ -374,7 +379,7 @@ class GuideExpressApp(tk.Tk):
                 "jamais automatiquement. Supprimez ici celles qui ne sont plus necessaires (Ctrl/Shift-clic\n"
                 "pour en selectionner plusieurs a la fois, ou purgez les sessions les plus anciennes d'un coup)."
             ),
-            foreground="#666", justify="left",
+            foreground=opl_theme.couleur("texte_doux"), justify="left",
         ).pack(anchor="w", pady=(4, 12))
 
         columns = ("session", "files", "size")
@@ -389,7 +394,7 @@ class GuideExpressApp(tk.Tk):
             tree.insert("", "end", iid=str(path), values=(path.name, file_count, f"{size_bytes / 1024:.0f} Ko"))
 
         if not sessions:
-            ttk.Label(frame, text="Aucune session enregistree pour le moment.", foreground="#666").pack(anchor="w", pady=10)
+            ttk.Label(frame, text="Aucune session enregistree pour le moment.", foreground=opl_theme.couleur("texte_doux")).pack(anchor="w", pady=10)
 
         actions = ttk.Frame(frame)
         actions.pack(fill="x", pady=(10, 0))
@@ -673,11 +678,11 @@ class GuideExpressApp(tk.Tk):
         frame = ttk.Frame(self.hud, padding=12)
         frame.pack()
         self.hud_status_var = tk.StringVar(value="Enregistrement en cours")
-        ttk.Label(frame, textvariable=self.hud_status_var, foreground="#c0392b", font=("Segoe UI", 10, "bold")).pack()
+        ttk.Label(frame, textvariable=self.hud_status_var, foreground=opl_theme.couleur("danger"), font=("Segoe UI", 10, "bold")).pack()
         self.hud_count_var = tk.StringVar(value="0 etape(s) capturee(s)")
         ttk.Label(frame, textvariable=self.hud_count_var).pack(pady=(4, 8))
         ttk.Label(
-            frame, text="Clic gauche ou droit = une etape", foreground="#666", font=("Segoe UI", 8),
+            frame, text="Clic gauche ou droit = une etape", foreground=opl_theme.couleur("texte_doux"), font=("Segoe UI", 8),
         ).pack(pady=(0, 6))
         # Avertissement UIPI/elevation (trouvaille d'audit, dimension 6) :
         # masque par defaut (pack() n'est appele que par
@@ -690,7 +695,7 @@ class GuideExpressApp(tk.Tk):
                 "Attention : fenetre administrateur au premier plan -\n"
                 "les clics ici ne seront PAS captures (limite Windows)"
             ),
-            foreground="#b35900", font=("Segoe UI", 8, "bold"),
+            foreground=opl_theme.couleur("avertissement"), font=("Segoe UI", 8, "bold"),
             justify="center", wraplength=230,
         )
         self.hud_pause_button = ttk.Button(frame, text="Pause", command=self._toggle_pause_recording)
@@ -887,6 +892,12 @@ class GuideExpressApp(tk.Tk):
         title_entry.bind("<Return>", lambda e: self._save_session_meta())
         self._step_count_var = tk.StringVar(value=f"{len(self.steps)} etape(s)")
         ttk.Label(top, textvariable=self._step_count_var).pack(side="left", padx=12)
+        ttk.Checkbutton(
+            top,
+            text="Afficher le marqueur de clic",
+            variable=self._show_marker_var,
+            command=self._on_toggle_click_marker,
+        ).pack(side="left", padx=12)
 
         # Bandeau "Annuler la suppression" (trouvaille d'audit, dimension 32) :
         # cree ici mais jamais pack() par defaut - _show_undo_bar()
@@ -897,7 +908,7 @@ class GuideExpressApp(tk.Tk):
         # annuler completement l'operation.
         self._undo_frame = ttk.Frame(top)
         self._undo_status_var = tk.StringVar(value="")
-        ttk.Label(self._undo_frame, textvariable=self._undo_status_var, foreground="#b35900").pack(side="left", padx=(0, 6))
+        ttk.Label(self._undo_frame, textvariable=self._undo_status_var, foreground=opl_theme.couleur("avertissement")).pack(side="left", padx=(0, 6))
         ttk.Button(self._undo_frame, text="Annuler", command=self._undo_delete).pack(side="left")
 
         list_frame = ttk.Frame(self._container)
@@ -1045,7 +1056,7 @@ class GuideExpressApp(tk.Tk):
             # quelques pixels a peine sur une capture haute resolution,
             # difficile a reperer dans une longue liste de cartes
             # (trouvaille d'audit, dimension 16).
-            img = render_step_thumbnail(step, THUMBNAIL_MAX_SIZE, zoom=step.zoom)
+            img = render_step_thumbnail(step, THUMBNAIL_MAX_SIZE, zoom=step.zoom, show_marker=self._show_marker_var.get())
         except (OSError, ValueError):
             logging.getLogger(__name__).warning(
                 "Image brute illisible pour l'etape %s (%s)",
@@ -1059,6 +1070,15 @@ class GuideExpressApp(tk.Tk):
         photo = ImageTk.PhotoImage(img)
         self._thumbnail_cache[step.uid] = photo
         return photo
+
+    def _on_toggle_click_marker(self):
+        """Affiche/masque le marqueur de clic sur les miniatures ET les exports.
+        Le rendu des miniatures depend desormais de ce reglage : on vide donc
+        entierement le cache (indexe par uid, sans notion de ce reglage) puis on
+        reconstruit l'ecran de relecture pour refleter le changement tout de
+        suite. Les exports lisent la valeur au moment ou ils sont lances."""
+        self._thumbnail_cache = {}
+        self._build_review_view()
 
     def _invalidate_thumbnail(self, step):
         """Invalide le cache de miniature ET le marqueur d'erreur associe
@@ -1131,13 +1151,13 @@ class GuideExpressApp(tk.Tk):
         self._build_step_row(self._review_inner, step, after=after_frame)
 
     def _build_step_row(self, parent, step, *, after=None):
-        row = ttk.Frame(parent, padding=8, relief="groove")
+        row = ttk.Frame(parent, padding=8, relief="solid", borderwidth=1)
         pack_kwargs = {"fill": "x", "pady": 4, "padx": 2}
         if after is not None:
             pack_kwargs["after"] = after
         row.pack(**pack_kwargs)
 
-        grip = ttk.Label(row, text="⣿⣿", foreground="#888", cursor="fleur")
+        grip = ttk.Label(row, text="⣿⣿", foreground=opl_theme.couleur("texte_doux"), cursor="fleur")
         grip.pack(side="left", padx=(0, 8))
         grip.bind("<ButtonPress-1>", lambda e, s=step: self._on_drag_start(s))
         grip.bind("<ButtonRelease-1>", self._on_drag_drop)
@@ -1189,7 +1209,7 @@ class GuideExpressApp(tk.Tk):
         # est grise (bug trouve a l'audit, dimension 1).
         error_label = ttk.Label(
             mid, text="Image introuvable ou corrompue",
-            foreground="#c0392b", font=("Segoe UI", 8, "bold"),
+            foreground=opl_theme.couleur("danger"), font=("Segoe UI", 8, "bold"),
         )
         if step.uid in self._thumbnail_error_uids:
             error_label.pack(anchor="w")
@@ -1428,7 +1448,7 @@ class GuideExpressApp(tk.Tk):
         frame = ttk.Frame(self.hud, padding=12)
         frame.pack()
         ttk.Label(
-            frame, text=f"Reprise de l'etape {step.index}", foreground="#c0392b", font=("Segoe UI", 10, "bold"),
+            frame, text=f"Reprise de l'etape {step.index}", foreground=opl_theme.couleur("danger"), font=("Segoe UI", 10, "bold"),
         ).pack()
         ttk.Label(frame, text="Cliquez sur l'element a capturer...").pack(pady=(4, 8))
         ttk.Button(frame, text="Annuler", command=self._cancel_retake).pack()
@@ -1618,7 +1638,7 @@ class GuideExpressApp(tk.Tk):
 
         def on_press(event):
             state["start"] = (event.x, event.y)
-            state["rect_id"] = canvas.create_rectangle(event.x, event.y, event.x, event.y, outline="red", width=2)
+            state["rect_id"] = canvas.create_rectangle(event.x, event.y, event.x, event.y, outline=opl_theme.couleur("danger"), width=2)
 
         def on_drag(event):
             if state["rect_id"] is not None:
@@ -1687,7 +1707,7 @@ class GuideExpressApp(tk.Tk):
         if not path:
             return
         try:
-            export_html(self.steps, self.title_var.get() or "Guide", Path(path))
+            export_html(self.steps, self.title_var.get() or "Guide", Path(path), show_marker=self._show_marker_var.get())
         except OSError as exc:
             messagebox.showerror("Echec de l'export", f"Impossible d'ecrire le fichier :\n{exc}")
             return
@@ -1700,7 +1720,7 @@ class GuideExpressApp(tk.Tk):
             return
         safe_name = sanitize_filename(self.title_var.get())
         try:
-            md_path = export_markdown(self.steps, self.title_var.get() or "Guide", Path(directory) / safe_name)
+            md_path = export_markdown(self.steps, self.title_var.get() or "Guide", Path(directory) / safe_name, show_marker=self._show_marker_var.get())
         except OSError as exc:
             messagebox.showerror("Echec de l'export", f"Impossible d'ecrire le guide :\n{exc}")
             return
@@ -1717,7 +1737,7 @@ class GuideExpressApp(tk.Tk):
         if not path:
             return
         try:
-            export_pdf(self.steps, self.title_var.get() or "Guide", Path(path))
+            export_pdf(self.steps, self.title_var.get() or "Guide", Path(path), show_marker=self._show_marker_var.get())
         except OSError as exc:
             messagebox.showerror("Echec de l'export", f"Impossible d'ecrire le fichier :\n{exc}")
             return

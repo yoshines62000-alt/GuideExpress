@@ -30,6 +30,15 @@ CLICK_MARKER_COLOR = (230, 30, 30)
 RIGHT_CLICK_MARKER_COLOR = (30, 90, 230)
 CLICK_MARKER_RADIUS = 22
 CLICK_MARKER_WIDTH = 4
+# Halo clair encadrant l'anneau colore. Sur une capture reelle, le clic tombe
+# souvent sur un element de couleur proche du marqueur (bouton rouge, lien
+# bleu...) ou l'anneau se fondrait sans contraste : un halo clair l'entoure
+# pour qu'il reste visible quel que soit le fond. C'est une couleur de CONTENU
+# d'image (le marqueur dessine SUR la capture, pas un element d'interface) :
+# elle est donc volontairement fixe et hors du theme opl_theme, comme
+# CLICK_MARKER_COLOR ci-dessus.
+CLICK_MARKER_HALO_COLOR = (255, 255, 255)
+CLICK_MARKER_HALO_WIDTH = 2
 REDACTION_COLOR = (20, 20, 20)
 
 # Signatures explicites (argtypes/restype) pour les appels Win32 utilises plus
@@ -391,10 +400,51 @@ def foreground_window_is_elevated() -> Optional[bool]:
     return target_level > own_level
 
 
-def render_step_image(step: Step, zoom: bool = False) -> Image.Image:
+def dessiner_marqueur(
+    draw: ImageDraw.ImageDraw,
+    x,
+    y,
+    radius: int,
+    width: int,
+    color: tuple,
+    halo_color: tuple = CLICK_MARKER_HALO_COLOR,
+    halo_width: int = CLICK_MARKER_HALO_WIDTH,
+) -> None:
+    """Dessine le marqueur de clic (anneau colore encadre d'un halo clair) a la
+    position (x, y) sur l'objet ImageDraw fourni. Factorise le SEUL et meme
+    dessin partout ou le marqueur apparait - miniature de relecture
+    (render_step_thumbnail) ET export HTML/Markdown/PDF (render_step_image) -
+    pour qu'il soit strictement identique dans l'apercu et dans le guide livre.
+
+    Ne dessine RIEN si la position de clic est absente (x ou y vaut None) : une
+    etape sans clic enregistre ne doit jamais afficher un marqueur invente a
+    l'origine (0, 0) - on n'affiche que ce qui a reellement ete capture.
+
+    Le halo est dessine EN PREMIER, a un rayon legerement superieur, puis
+    l'anneau colore par-dessus : l'anneau colore tombe ainsi exactement au
+    rayon `radius` demande (le halo ne fait que l'entourer vers l'exterieur),
+    ce qui garantit une couleur franche a la position exacte du contour."""
+    if x is None or y is None:
+        return
+    if halo_width > 0:
+        draw.ellipse(
+            [x - radius - halo_width, y - radius - halo_width,
+             x + radius + halo_width, y + radius + halo_width],
+            outline=halo_color,
+            width=width + 2 * halo_width,
+        )
+    draw.ellipse(
+        [x - radius, y - radius, x + radius, y + radius],
+        outline=color,
+        width=width,
+    )
+
+
+def render_step_image(step: Step, zoom: bool = False, show_marker: bool = True) -> Image.Image:
     """Construit l'image finale d'une etape (marqueur de clic + redactions applique)
     a partir de l'image brute, SANS jamais modifier le fichier source sur le disque.
-    Permet de re-editer une etape (ex: ajouter une redaction) sans perte d'information."""
+    Permet de re-editer une etape (ex: ajouter une redaction) sans perte d'information.
+    `show_marker=False` masque le marqueur de clic (reglage global de l'interface)."""
     with Image.open(step.raw_image_path) as src:
         img = src.convert("RGB").copy()
 
@@ -404,16 +454,12 @@ def render_step_image(step: Step, zoom: bool = False) -> Image.Image:
         top, bottom = sorted((y1, y2))
         draw.rectangle([left, top, right, bottom], fill=REDACTION_COLOR)
 
-    r = CLICK_MARKER_RADIUS
     cx, cy = step.click_x, step.click_y
     marker_color = RIGHT_CLICK_MARKER_COLOR if step.button == "right" else CLICK_MARKER_COLOR
-    draw.ellipse(
-        [cx - r, cy - r, cx + r, cy + r],
-        outline=marker_color,
-        width=CLICK_MARKER_WIDTH,
-    )
+    if show_marker:
+        dessiner_marqueur(draw, cx, cy, CLICK_MARKER_RADIUS, CLICK_MARKER_WIDTH, marker_color)
 
-    if zoom:
+    if zoom and cx is not None and cy is not None:
         img = _crop_zoomed_region(img, cx, cy)
 
     return img
@@ -450,7 +496,7 @@ THUMBNAIL_MARKER_RADIUS = 8
 THUMBNAIL_MARKER_WIDTH = 3
 
 
-def render_step_thumbnail(step: Step, max_size: tuple, zoom: bool = False) -> Image.Image:
+def render_step_thumbnail(step: Step, max_size: tuple, zoom: bool = False, show_marker: bool = True) -> Image.Image:
     """Construit la miniature d'une etape pour l'ecran de relecture, avec un
     marqueur de clic a taille garantie (voir THUMBNAIL_MARKER_RADIUS/WIDTH
     ci-dessus) plutot que de reduire un marqueur deja dessine en pleine
@@ -471,7 +517,8 @@ def render_step_thumbnail(step: Step, max_size: tuple, zoom: bool = False) -> Im
         draw.rectangle([left, top, right, bottom], fill=REDACTION_COLOR)
 
     cx, cy = step.click_x, step.click_y
-    if zoom:
+    has_click = cx is not None and cy is not None
+    if zoom and has_click:
         left, top, right, bottom = _zoomed_region_bounds(img.width, img.height, cx, cy)
         img = img.crop((left, top, right, bottom))
         cx, cy = cx - left, cy - top
@@ -479,16 +526,14 @@ def render_step_thumbnail(step: Step, max_size: tuple, zoom: bool = False) -> Im
     orig_width = img.width
     img.thumbnail(max_size)
     scale = img.width / orig_width if orig_width else 1.0
-    cx, cy = cx * scale, cy * scale
 
     draw = ImageDraw.Draw(img)
-    r = THUMBNAIL_MARKER_RADIUS
     marker_color = RIGHT_CLICK_MARKER_COLOR if step.button == "right" else CLICK_MARKER_COLOR
-    draw.ellipse(
-        [cx - r, cy - r, cx + r, cy + r],
-        outline=marker_color,
-        width=THUMBNAIL_MARKER_WIDTH,
-    )
+    if show_marker and has_click:
+        dessiner_marqueur(
+            draw, cx * scale, cy * scale,
+            THUMBNAIL_MARKER_RADIUS, THUMBNAIL_MARKER_WIDTH, marker_color,
+        )
     return img
 
 

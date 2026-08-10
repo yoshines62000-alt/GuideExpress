@@ -34,19 +34,20 @@ def _resize_for_export(img: Image.Image) -> Image.Image:
     return img
 
 
-def _step_to_png_bytes(step, zoom: bool = False) -> bytes:
-    img = _resize_for_export(render_step_image(step, zoom=zoom))
+def _step_to_png_bytes(step, zoom: bool = False, show_marker: bool = True) -> bytes:
+    img = _resize_for_export(render_step_image(step, zoom=zoom, show_marker=show_marker))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
 
 
-def export_html(steps: list, title: str, output_path: Path) -> None:
+def export_html(steps: list, title: str, output_path: Path, show_marker: bool = True) -> None:
     """Genere un fichier HTML autonome (images encodees en base64 - un seul
-    fichier a partager, rien a oublier)."""
+    fichier a partager, rien a oublier). `show_marker=False` exporte les
+    captures sans le marqueur de clic (reglage global de l'interface)."""
     sections = []
     for step in steps:
-        png_bytes = _step_to_png_bytes(step, zoom=step.zoom)
+        png_bytes = _step_to_png_bytes(step, zoom=step.zoom, show_marker=show_marker)
         b64 = base64.b64encode(png_bytes).decode("ascii")
         alt_text = html_escape(step.display_description())
         sections.append(
@@ -76,7 +77,7 @@ h1 {{ border-bottom: 3px solid #2563eb; padding-bottom: 0.5rem; }}
     output_path.write_text(html, encoding="utf-8")
 
 
-def export_markdown(steps: list, title: str, output_dir: Path) -> Path:
+def export_markdown(steps: list, title: str, output_dir: Path, show_marker: bool = True) -> Path:
     """Genere un fichier Markdown (.md) accompagne d'un sous-dossier d'images.
     Renvoie le chemin du fichier .md cree."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -93,7 +94,7 @@ def export_markdown(steps: list, title: str, output_dir: Path) -> Path:
     lines = [f"# {escape_markdown(title)}", "", f"{len(steps)} etape(s).", ""]
     for step in steps:
         image_name = f"etape-{step.index:03d}.png"
-        (images_dir / image_name).write_bytes(_step_to_png_bytes(step, zoom=step.zoom))
+        (images_dir / image_name).write_bytes(_step_to_png_bytes(step, zoom=step.zoom, show_marker=show_marker))
         alt_text = escape_markdown(step.display_description())
         lines.append(f"## Etape {step.index}")
         lines.append("")
@@ -118,10 +119,10 @@ def _latin1_safe(text: str) -> str:
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
-def _step_to_pdf_page(step, title_prefix: str) -> Image.Image:
+def _step_to_pdf_page(step, title_prefix: str, show_marker: bool = True) -> Image.Image:
     """Compose une page image : capture de l'etape en haut, titre et
     description en dessous sur fond blanc (pret a etre assemble en PDF)."""
-    screenshot = _resize_for_export(render_step_image(step, zoom=step.zoom).convert("RGB"))
+    screenshot = _resize_for_export(render_step_image(step, zoom=step.zoom, show_marker=show_marker).convert("RGB"))
 
     page = Image.new("RGB", (screenshot.width, screenshot.height + _PDF_TEXT_AREA_HEIGHT), color="white")
     page.paste(screenshot, (0, 0))
@@ -133,9 +134,10 @@ def _step_to_pdf_page(step, title_prefix: str) -> Image.Image:
     return page
 
 
-def export_pdf(steps: list, title: str, output_path: Path) -> None:
+def export_pdf(steps: list, title: str, output_path: Path, show_marker: bool = True) -> None:
     """Genere un PDF autonome (une page par etape, capture + description),
-    via Pillow uniquement - aucune dependance PDF supplementaire."""
+    via Pillow uniquement - aucune dependance PDF supplementaire.
+    `show_marker=False` exporte les captures sans le marqueur de clic."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if not steps:
         # Une page de titre minimale plutot que planter, coherent avec le
@@ -145,5 +147,5 @@ def export_pdf(steps: list, title: str, output_path: Path) -> None:
         page.save(output_path, format="PDF")
         return
 
-    pages = [_step_to_pdf_page(step, "Etape") for step in steps]
+    pages = [_step_to_pdf_page(step, "Etape", show_marker=show_marker) for step in steps]
     pages[0].save(output_path, format="PDF", save_all=True, append_images=pages[1:])

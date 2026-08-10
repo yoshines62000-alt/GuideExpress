@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -218,6 +218,77 @@ class RenderStepThumbnailTestCase(unittest.TestCase):
         step = self._step(self.tmp / "n_existe_pas.png")
         with self.assertRaises((OSError, ValueError)):
             cap.render_step_thumbnail(step, self.max_size)
+
+
+class ClickMarkerUtilityTestCase(unittest.TestCase):
+    """Marqueur de clic factorise (dessiner_marqueur) : halo de visibilite,
+    absence de dessin quand aucune position de clic n'est enregistree, et
+    reglage global d'affichage. Le marqueur ne doit refleter QUE la position
+    reellement capturee, jamais une position inventee a l'origine (0, 0)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def _raw(self, color, size=(400, 300)):
+        path = self.tmp / f"raw_{'_'.join(map(str, color))}_{size[0]}.png"
+        Image.new("RGB", size, color=color).save(path)
+        return path
+
+    def _step(self, raw_path, **overrides):
+        defaults = dict(
+            index=1, raw_image_path=raw_path, click_x=200, click_y=150,
+            window_title="Bloc-notes", timestamp="2026-01-01 10:00:00",
+        )
+        defaults.update(overrides)
+        return cap.Step(**defaults)
+
+    def _has_color(self, img, color):
+        width, height = img.size
+        return any(
+            img.getpixel((x, y)) == color
+            for y in range(height) for x in range(width)
+        )
+
+    def test_halo_frames_the_colored_ring(self):
+        # Fond vif distinct du blanc (halo) ET de la couleur du marqueur : le
+        # halo clair doit apparaitre juste a l'exterieur de l'anneau colore,
+        # pour que le marqueur reste visible meme sur un fond de teinte proche.
+        step = self._step(self._raw((0, 180, 0)), click_x=200, click_y=150)
+        img = cap.render_step_image(step)
+        r = cap.CLICK_MARKER_RADIUS
+        self.assertEqual(img.getpixel((200 + r, 150)), cap.CLICK_MARKER_COLOR)
+        self.assertEqual(img.getpixel((200 + r + 1, 150)), cap.CLICK_MARKER_HALO_COLOR)
+
+    def test_no_marker_drawn_when_click_position_is_missing(self):
+        # click_x/click_y a None = aucune position de clic capturee : ne rien
+        # dessiner (ni marqueur, ni halo), plutot qu'un marqueur a (0, 0).
+        step = self._step(self._raw((0, 180, 0)), click_x=None, click_y=None)
+        img = cap.render_step_image(step)
+        self.assertFalse(self._has_color(img, cap.CLICK_MARKER_COLOR))
+        self.assertFalse(self._has_color(img, cap.CLICK_MARKER_HALO_COLOR))
+
+    def test_show_marker_false_suppresses_marker_in_render(self):
+        step = self._step(self._raw((0, 180, 0)))
+        img = cap.render_step_image(step, show_marker=False)
+        self.assertFalse(self._has_color(img, cap.CLICK_MARKER_COLOR))
+
+    def test_show_marker_false_suppresses_marker_in_thumbnail(self):
+        step = self._step(self._raw((0, 180, 0), size=(1600, 900)), click_x=800, click_y=450)
+        thumb = cap.render_step_thumbnail(step, (220, 150), show_marker=False)
+        self.assertFalse(self._has_color(thumb, cap.CLICK_MARKER_COLOR))
+
+    def test_thumbnail_draws_no_marker_when_click_missing(self):
+        step = self._step(self._raw((0, 180, 0), size=(1600, 900)), click_x=None, click_y=None)
+        thumb = cap.render_step_thumbnail(step, (220, 150))
+        self.assertFalse(self._has_color(thumb, cap.CLICK_MARKER_COLOR))
+
+    def test_dessiner_marqueur_is_a_no_op_for_none_coordinates(self):
+        img = Image.new("RGB", (100, 100), color=(0, 180, 0))
+        draw = ImageDraw.Draw(img)
+        cap.dessiner_marqueur(draw, None, 50, 10, 3, cap.CLICK_MARKER_COLOR)
+        cap.dessiner_marqueur(draw, 50, None, 10, 3, cap.CLICK_MARKER_COLOR)
+        self.assertFalse(self._has_color(img, cap.CLICK_MARKER_COLOR))
+        self.assertFalse(self._has_color(img, cap.CLICK_MARKER_HALO_COLOR))
 
 
 class HudMonitorPositioningTestCase(unittest.TestCase):
