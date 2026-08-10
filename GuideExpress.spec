@@ -45,6 +45,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version='version_info.txt',
     icon=['icon.ico'],
     # Manifeste DPI-aware (trouvaille d'audit, dimension 7) : voir
     # GuideExpress.manifest pour le detail et la justification complete.
