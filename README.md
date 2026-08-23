@@ -112,6 +112,16 @@ python -m pip install -r requirements.txt
   sessions plus anciennes qu'un nombre de jours donné), ou en vidant le
   dossier manuellement.
 
+## Mes données — lisibles sans l'application
+
+GuideExpress n'enferme rien : chaque guide vit dans son propre dossier sous
+`~/.guide_express/sessions/`, avec un `session.json` (le titre et les étapes,
+en texte clair) et les captures en fichiers **PNG** à côté. Si un jour
+l'exécutable refuse de démarrer, ouvrez ce dossier : le JSON se lit dans
+n'importe quel éditeur, les images dans n'importe quelle visionneuse. Aucun
+outil de secours n'est nécessaire — c'est déjà le format ouvert vers lequel un
+outil exporterait.
+
 ## Limites connues
 
 ### Clics dans une fenêtre lancée en tant qu'administrateur
