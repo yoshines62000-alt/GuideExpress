@@ -230,7 +230,7 @@ class GuideExpressApp(tk.Tk):
         # deroutante qu'un simple no-op si jamais un appel y accedait tot).
         self._last_deleted = None
         self._undo_after_id = None
-        opl_theme.entete(self, "GuideExpress", "Guides pas-a-pas", on_contact=lambda: opl_contact.ouvrir(self, app="GuideExpress", version=APP_VERSION)).pack(fill="x", side="top")
+        opl_theme.entete(self, "GuideExpress", "Guides pas-a-pas", on_contact=lambda: opl_contact.ouvrir(self, app="GuideExpress", version=APP_VERSION), slug="guideexpress", version=APP_VERSION).pack(fill="x", side="top")
         self._container = ttk.Frame(self)
         self._container.pack(fill="both", expand=True)
 
