@@ -443,9 +443,15 @@ class GuideExpressApp(tk.Tk):
             self.session_dir.mkdir(parents=True, exist_ok=True)
             final_path = self.session_dir / SESSION_META_FILENAME
             tmp_path = self.session_dir / f"{SESSION_META_FILENAME}.tmp"
-            tmp_path.write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8",
-            )
+            # os.replace ne rend atomique que le RENOMMAGE, pas l'arrivee des
+            # octets sur le disque : write_text() seul laisserait, apres une
+            # coupure de courant, un session.json en place, bien nomme, et
+            # vide - soit une session perdue alors que ses images sont la
+            # (constat C9 de l'audit du 2026-08-26).
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(meta, ensure_ascii=False, indent=2))
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp_path, final_path)
         except OSError:
             pass  # une sauvegarde de metadonnees ratee ne doit jamais interrompre l'edition en cours
