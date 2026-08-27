@@ -245,6 +245,9 @@ class GuideExpressApp(tk.Tk):
         self.update_status_var = tk.StringVar(value="")
         self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground=opl_theme.couleur("texte_doux"))
         self.update_status_label.pack(side="left", padx=(6, 0), pady=4)
+        # Ce qui s'est passe, SANS arreter l'utilisateur.
+        self.statut = opl_theme.Statut(bottom_bar)
+        self.statut.pack(side="left", padx=(12, 0), pady=4)
         donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground=opl_theme.couleur("lien"), cursor="hand2")
         donate_label.pack(side="right", padx=8, pady=4)
         donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
@@ -601,10 +604,9 @@ class GuideExpressApp(tk.Tk):
         cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
         old_paths = [path for path, _files, _size in self._list_sessions() if self._session_date(path) < cutoff]
         if not old_paths:
-            messagebox.showinfo(
-                "Supprimer les anciennes sessions",
+            self.statut.dire(
                 f"Aucune session de plus de {days} jour(s).",
-            )
+                ton="info")
             return
         if not opl_theme.dialogue(
             self, "Supprimer les anciennes sessions",
