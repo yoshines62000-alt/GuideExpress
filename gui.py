@@ -467,7 +467,9 @@ class GuideExpressApp(tk.Tk):
     def _reopen_session(self, tree):
         selection = tree.selection()
         if not selection:
-            messagebox.showinfo("Rouvrir une session", "Selectionnez une session d'abord.")
+            self.statut.dire(
+                "Selectionnez une session d'abord.",
+                ton="alerte")
             return
         session_path = Path(selection[0])
         meta_path = session_path / SESSION_META_FILENAME
@@ -566,7 +568,9 @@ class GuideExpressApp(tk.Tk):
         # cochees (bug trouve a l'audit).
         selection = tree.selection()
         if not selection:
-            messagebox.showinfo("Gerer les sessions", "Selectionnez au moins une session d'abord.")
+            self.statut.dire(
+                "Selectionnez au moins une session d'abord.",
+                ton="alerte")
             return
         session_paths = [Path(iid) for iid in selection]
         count = len(session_paths)
