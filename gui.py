@@ -172,8 +172,8 @@ class GuideExpressApp(tk.Tk):
         # defilement horizontale pour les atteindre (trouvaille d'audit,
         # verifiee empiriquement). 900px laisse une marge confortable sur un
         # ecran 1920x1080 standard.
-        self.geometry("900x560")
-        self.minsize(760, 420)
+        self.geometry("1070x560")
+        self.minsize(930, 420)
         try:
             self.iconbitmap(str(_resource_path("icon.ico")))
         except tk.TclError:
@@ -230,7 +230,12 @@ class GuideExpressApp(tk.Tk):
         # deroutante qu'un simple no-op si jamais un appel y accedait tot).
         self._last_deleted = None
         self._undo_after_id = None
-        opl_theme.entete(self, "GuideExpress", "Guides pas-a-pas", on_contact=lambda: opl_contact.ouvrir(self, app="GuideExpress", version=APP_VERSION), slug="guideexpress", version=APP_VERSION).pack(fill="x", side="top")
+        # Cette application n'a pas de navigation par vues : la colonne
+        # ne porte que la marque, Theme et Aide, et se pose a gauche.
+        opl_theme.entete(
+            self, "GuideExpress", "Guides pas-a-pas",
+            on_contact=lambda: opl_contact.ouvrir(self, app="GuideExpress", version=APP_VERSION),
+            slug="guideexpress", version=APP_VERSION, avec_contenu=False).pack(side="left", fill="y")
         self._container = ttk.Frame(self)
         self._container.pack(fill="both", expand=True)
 
