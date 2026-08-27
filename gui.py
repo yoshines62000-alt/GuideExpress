@@ -571,7 +571,10 @@ class GuideExpressApp(tk.Tk):
                 f"Supprimer {count} session(s) ?\n\n{names}\n\n"
                 "Cette action est irreversible."
             )
-        if not messagebox.askyesno("Supprimer la session" if count == 1 else "Supprimer les sessions", message):
+        if not opl_theme.dialogue(
+            self, "Supprimer la session" if count == 1 else "Supprimer les sessions",
+            message,
+            confirmer="Supprimer", danger=True):
             return
         failures = self._delete_session_paths(session_paths)
         self._build_sessions_view()
@@ -598,11 +601,11 @@ class GuideExpressApp(tk.Tk):
                 f"Aucune session de plus de {days} jour(s).",
             )
             return
-        if not messagebox.askyesno(
-            "Supprimer les anciennes sessions",
+        if not opl_theme.dialogue(
+            self, "Supprimer les anciennes sessions",
             f"Supprimer definitivement {len(old_paths)} session(s) de plus de {days} jour(s) "
             "et toutes leurs captures ?\nCette action est irreversible.",
-        ):
+            confirmer="Supprimer ces sessions", danger=True):
             return
         failures = self._delete_session_paths(old_paths)
         self._build_sessions_view()
@@ -1282,7 +1285,10 @@ class GuideExpressApp(tk.Tk):
         self._save_session_meta()
 
     def _delete(self, step):
-        if not messagebox.askyesno("Supprimer l'etape", "Supprimer cette etape du guide ?"):
+        if not opl_theme.dialogue(
+            self, "Supprimer l'etape",
+            "Supprimer cette etape du guide ?",
+            confirmer="Supprimer l'etape", danger=True):
             return
         index = self.steps.index(step)
         delete_step(self.steps, index)
@@ -1308,7 +1314,7 @@ class GuideExpressApp(tk.Tk):
     def _show_undo_bar(self, step, index):
         """Affiche le bandeau "Annuler" pendant quelques secondes apres une
         suppression confirmee (trouvaille d'audit, dimension 32) : la
-        confirmation par boite de dialogue (messagebox.askyesno ci-dessus)
+        confirmation par boite de dialogue (opl_theme.dialogue ci-dessus)
         limite deja le risque, mais un clic "Oui" reflexe sur la mauvaise
         carte dans une longue liste reste possible et, jusqu'ici, sans aucun
         recours depuis l'interface une fois confirme. Au plus UNE suppression
@@ -1733,7 +1739,10 @@ class GuideExpressApp(tk.Tk):
         except OSError as exc:
             messagebox.showerror("Echec de l'export", f"Impossible d'ecrire le fichier :\n{exc}")
             return
-        if messagebox.askyesno("Export termine", f"Guide exporte :\n{path}\n\nL'ouvrir maintenant ?"):
+        if opl_theme.dialogue(
+            self, "Export termine",
+            f"Guide exporte :\n{path}\n\nL'ouvrir maintenant ?",
+            confirmer="Ouvrir le guide"):
             os.startfile(path)
 
     def _export_markdown(self):
@@ -1763,7 +1772,10 @@ class GuideExpressApp(tk.Tk):
         except OSError as exc:
             messagebox.showerror("Echec de l'export", f"Impossible d'ecrire le fichier :\n{exc}")
             return
-        if messagebox.askyesno("Export termine", f"Guide exporte :\n{path}\n\nL'ouvrir maintenant ?"):
+        if opl_theme.dialogue(
+            self, "Export termine",
+            f"Guide exporte :\n{path}\n\nL'ouvrir maintenant ?",
+            confirmer="Ouvrir le guide"):
             os.startfile(path)
 
     # ------------------------------------------------------------------

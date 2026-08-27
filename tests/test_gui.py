@@ -125,10 +125,16 @@ class _RealAppTestCase(unittest.TestCase):
         self.addCleanup(self._update_check_patcher.stop)
 
         self.mocks = {}
-        for name in ("showinfo", "showwarning", "showerror", "askyesno"):
+        for name in ("showinfo", "showwarning", "showerror"):
             patcher = mock.patch.object(gui_mod.messagebox, name)
             self.mocks[name] = patcher.start()
             self.addCleanup(patcher.stop)
+        # Les confirmations passent par opl_theme.dialogue (fenetre themee)
+        # et non plus par messagebox.askyesno. Sans ce mock, un vrai dialogue
+        # modal s'ouvre et wait_window() fige la suite de tests.
+        patcher = mock.patch.object(gui_mod.opl_theme, "dialogue")
+        self.mocks["askyesno"] = patcher.start()
+        self.addCleanup(patcher.stop)
 
         self.app = gui_mod.GuideExpressApp()
         self.addCleanup(self.app.destroy)
