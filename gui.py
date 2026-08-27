@@ -1774,7 +1774,9 @@ class GuideExpressApp(tk.Tk):
                 f"Impossible d'ecrire le guide :\n{exc}",
                 ton="erreur")
             return
-        messagebox.showinfo("Export termine", f"Guide exporte :\n{md_path}")
+        # Un constat d'une ligne, apres une action que l'utilisateur vient
+        # de demander : il sait deja ce qui se passe, il veut juste savoir OU.
+        self.statut.dire(f"Guide exporte : {md_path}", ton="succes")
 
     def _export_pdf(self):
         safe_name = sanitize_filename(self.title_var.get())
