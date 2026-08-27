@@ -225,6 +225,41 @@ class ReviewViewCorruptedImageTestCase(_RealAppTestCase):
 
 
 @unittest.skipUnless(_TK_AVAILABLE, "Aucun affichage Tk disponible dans cet environnement.")
+class EtatVideEtapesTestCase(_RealAppTestCase):
+    """Une session sans etape doit dire QUOI FAIRE, pas seulement constater
+    (refonte du 2026-08-26)."""
+
+    def test_une_session_sans_etape_explique_et_propose_de_relancer(self):
+        self.app.steps = []
+        self.app._build_review_view()
+        textes = _textes_de(self.app)
+        self.assertIn("Aucune etape capturee", textes)
+        self.assertIn("il ne lit jamais le", " ".join(textes.split()),
+                      "l'etat vide doit rappeler qu'aucune frappe n'est capturee")
+        self.assertIn("Nouvel enregistrement", textes, "il doit proposer l'action")
+
+    def test_une_session_avec_des_etapes_n_affiche_pas_l_etat_vide(self):
+        """Contre-epreuve, avec une VRAIE etape : une contre-epreuve qui se
+        saute ne prouve rien — c'est un test incapable de se declencher."""
+        session_dir = self.tmp / "sessions" / "20260101-100000"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        self.app.session_dir = session_dir
+        self.app.steps = [self._make_step(1, session_dir)]
+        self.app._build_review_view()
+        self.assertNotIn("Aucune etape capturee", _textes_de(self.app))
+
+
+def _textes_de(widget) -> str:
+    morceaux = []
+    for enfant in widget.winfo_children():
+        try:
+            morceaux.append(str(enfant.cget("text")))
+        except Exception:
+            pass
+        morceaux.append(_textes_de(enfant))
+    return " ".join(morceaux)
+
+
 class MinsizeButtonsVisibleTestCase(_RealAppTestCase):
     """Dimension 8 de l'audit : a la taille minimale de fenetre EXACTEMENT
     declaree par l'application elle-meme (self.minsize()), les boutons

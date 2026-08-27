@@ -961,7 +961,18 @@ class GuideExpressApp(tk.Tk):
         self._review_inner = inner  # reutilise par les insertions incrementales (duplication)
 
         if not self.steps:
-            ttk.Label(inner, text="Aucune etape capturee (aucun clic detecte pendant l'enregistrement).").pack(pady=20)
+            # Un libelle qui CONSTATE laissait l'utilisateur sans porte de
+            # sortie : il disait ce qui manquait, jamais quoi faire. L'etat
+            # vide commun explique la cause probable et propose l'action.
+            opl_theme.etat_vide(
+                inner,
+                "Aucune etape capturee",
+                "Aucun clic n'a ete detecte pendant l'enregistrement. GuideExpress "
+                "capture un ecran a chaque clic de souris — il ne lit jamais le "
+                "clavier. Verifiez que la fenetre a enregistrer n'est pas ouverte "
+                "en administrateur, puis relancez.",
+                action=self._build_start_view,
+                libelle="Nouvel enregistrement").pack(fill="both", expand=True, pady=20)
 
         self._drag_uid = None
         # Reactivite pendant la construction (trouvaille d'audit, dimension
