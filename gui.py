@@ -275,11 +275,11 @@ class GuideExpressApp(tk.Tk):
             "Exception non geree dans un callback Tk", exc_info=(exc, val, tb),
         )
         try:
-            messagebox.showerror(
-                "Erreur inattendue",
+            opl_theme.message(
+                self, "Erreur inattendue",
                 "Une erreur inattendue est survenue.\n\n"
                 f"Details enregistres dans le journal :\n{LOG_PATH}",
-            )
+                ton="erreur")
         except tk.TclError:
             pass  # Tk lui-meme dans un etat instable : ne pas aggraver la situation
 
@@ -472,18 +472,21 @@ class GuideExpressApp(tk.Tk):
         session_path = Path(selection[0])
         meta_path = session_path / SESSION_META_FILENAME
         if not meta_path.exists():
-            messagebox.showinfo(
-                "Rouvrir une session",
+            opl_theme.message(
+                self, "Rouvrir une session",
                 "Cette session n'a pas de fichier de metadonnees (enregistree avant "
                 "cette fonctionnalite, ou clic droit sur 'Retour' sans jamais avoir "
                 "atteint la relecture) : seules les captures brutes existent, elle "
                 "ne peut pas etre rouverte automatiquement.",
-            )
+                ton="info")
             return
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            messagebox.showerror("Rouvrir une session", f"Fichier de session illisible ou corrompu :\n{exc}")
+            opl_theme.message(
+                self, "Rouvrir une session",
+                f"Fichier de session illisible ou corrompu :\n{exc}",
+                ton="erreur")
             return
 
         steps = []
@@ -512,10 +515,10 @@ class GuideExpressApp(tk.Tk):
         self._thumbnail_error_uids = set()
         self._build_review_view()
         if missing:
-            messagebox.showwarning(
-                "Rouvrir une session",
+            opl_theme.message(
+                self, "Rouvrir une session",
                 f"{missing} etape(s) ignoree(s) : leur image brute est introuvable sur le disque.",
-            )
+                ton="alerte")
 
     @staticmethod
     def _session_date(path: Path) -> datetime.datetime:
@@ -545,15 +548,14 @@ class GuideExpressApp(tk.Tk):
                 failures.append((session_path.name, str(exc)))
         return failures
 
-    @staticmethod
-    def _report_delete_failures(failures: list, total: int) -> None:
+    def _report_delete_failures(self, failures: list, total: int) -> None:
         if not failures:
             return
         details = "\n".join(f"- {name} : {err}" for name, err in failures)
-        messagebox.showwarning(
-            "Suppression partielle",
+        opl_theme.message(
+            self, "Suppression partielle",
             f"{len(failures)} session(s) sur {total} n'ont pas pu etre supprimee(s) :\n\n{details}",
-        )
+            ton="alerte")
 
     def _delete_session(self, tree):
         # Le Treeview est en mode de selection "extended" (defaut de
@@ -660,14 +662,14 @@ class GuideExpressApp(tk.Tk):
                 self.hud.destroy()
                 self.hud = None
             self.deiconify()
-            messagebox.showerror(
-                error_title,
+            opl_theme.message(
+                self, error_title,
                 f"{error_intro}\n\n"
                 "Causes possibles : permissions insuffisantes, antivirus/EDR "
                 "bloquant l'ecoute de la souris, ou dossier de session "
                 "inaccessible en ecriture.\n\n"
                 f"Detail : {exc}",
-            )
+                ton="erreur")
             return None
 
     def _start_recording(self):
@@ -858,17 +860,17 @@ class GuideExpressApp(tk.Tk):
         self._build_review_view()
 
         if not fully_saved:
-            messagebox.showwarning(
-                "Enregistrement",
+            opl_theme.message(
+                self, "Enregistrement",
                 "Certaines captures n'ont pas pu etre finalisees a temps : "
                 "il est possible qu'une etape manque a la fin du guide.",
-            )
+                ton="alerte")
         if errors:
-            messagebox.showwarning(
-                "Erreurs de capture",
+            opl_theme.message(
+                self, "Erreurs de capture",
                 "Certains clics n'ont pas pu etre enregistres correctement :\n\n"
                 + "\n".join(errors),
-            )
+                ton="alerte")
 
     # ------------------------------------------------------------------
     # Ecran de relecture / edition
@@ -1035,15 +1037,15 @@ class GuideExpressApp(tk.Tk):
         # pour les fichiers manquants dans _reopen_session.
         error_count = sum(1 for step in self.steps if step.uid in self._thumbnail_error_uids)
         if error_count:
-            messagebox.showwarning(
-                "Images illisibles",
+            opl_theme.message(
+                self, "Images illisibles",
                 f"{error_count} etape(s) ont une image brute illisible ou corrompue "
                 "(fichier vide, endommage, ou verrouille par un antivirus) et "
                 "s'affichent avec une vignette de remplacement, reperable a la "
                 "mention \"Image introuvable ou corrompue\" sur leur carte.\n\n"
                 "Utilisez le bouton \"Reprendre\" pour recapturer l'etape "
                 "concernee, ou \"Supprimer\" pour la retirer du guide.",
-            )
+                ton="alerte")
 
     def _get_error_thumbnail(self):
         """Vignette de remplacement (fond gris, croix rouge) affichee a la
@@ -1620,10 +1622,10 @@ class GuideExpressApp(tk.Tk):
             # Charger l'image AVANT d'ouvrir la fenetre modale (grab_set)
             # evite de laisser l'application bloquee sur une boite vide si
             # cet appel echoue.
-            messagebox.showerror(
-                "Image introuvable",
+            opl_theme.message(
+                self, "Image introuvable",
                 f"Impossible de charger la capture de l'etape {step.index} :\n{exc}",
-            )
+                ton="erreur")
             return
 
         editor = tk.Toplevel(self)
@@ -1744,7 +1746,10 @@ class GuideExpressApp(tk.Tk):
         try:
             export_html(self.steps, self.title_var.get() or "Guide", Path(path), show_marker=self._show_marker_var.get())
         except OSError as exc:
-            messagebox.showerror("Echec de l'export", f"Impossible d'ecrire le fichier :\n{exc}")
+            opl_theme.message(
+                self, "Echec de l'export",
+                f"Impossible d'ecrire le fichier :\n{exc}",
+                ton="erreur")
             return
         if opl_theme.dialogue(
             self, "Export termine",
@@ -1760,7 +1765,10 @@ class GuideExpressApp(tk.Tk):
         try:
             md_path = export_markdown(self.steps, self.title_var.get() or "Guide", Path(directory) / safe_name, show_marker=self._show_marker_var.get())
         except OSError as exc:
-            messagebox.showerror("Echec de l'export", f"Impossible d'ecrire le guide :\n{exc}")
+            opl_theme.message(
+                self, "Echec de l'export",
+                f"Impossible d'ecrire le guide :\n{exc}",
+                ton="erreur")
             return
         messagebox.showinfo("Export termine", f"Guide exporte :\n{md_path}")
 
@@ -1777,7 +1785,10 @@ class GuideExpressApp(tk.Tk):
         try:
             export_pdf(self.steps, self.title_var.get() or "Guide", Path(path), show_marker=self._show_marker_var.get())
         except OSError as exc:
-            messagebox.showerror("Echec de l'export", f"Impossible d'ecrire le fichier :\n{exc}")
+            opl_theme.message(
+                self, "Echec de l'export",
+                f"Impossible d'ecrire le fichier :\n{exc}",
+                ton="erreur")
             return
         if opl_theme.dialogue(
             self, "Export termine",

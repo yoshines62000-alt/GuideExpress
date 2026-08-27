@@ -72,6 +72,34 @@ import capture as cap
 import gui as gui_mod
 from capture import Step
 
+# --- FILET ANTI-BLOCAGE -----------------------------------------------------
+# `opl_theme.message()` dessine une vraie fenetre modale qui attend un clic.
+# Un test qui emprunte un chemin d'erreur ferait pendre la suite ENTIERE : pas
+# d'echec, pas de trace, juste une execution qui ne finit jamais. On neutralise
+# donc le composant pour tout ce module. Les tests qui verifient un message le
+# repatchent localement — un patch imbrique prend le pas sur celui-ci.
+_filet_message = None
+
+
+def setUpModule():
+    # Imports locaux : les fichiers hotes ne nomment pas ces modules de la
+    # meme facon (`patch` ou `mock.patch`, `gui` ou `gui as gui_mod`, ou pas de
+    # gui du tout). `opl_theme` est le meme objet module que `gui.opl_theme`,
+    # le patch porte donc des deux cotes.
+    from unittest.mock import patch as _patch
+
+    import opl_theme as _theme
+
+    global _filet_message
+    _filet_message = _patch.object(_theme, "message")
+    _filet_message.start()
+
+
+def tearDownModule():
+    if _filet_message is not None:
+        _filet_message.stop()
+# ----------------------------------------------------------------------------
+
 
 def _tk_available() -> bool:
     """Certains environnements d'execution (CI headless, session distante
@@ -135,6 +163,12 @@ class _RealAppTestCase(unittest.TestCase):
         patcher = mock.patch.object(gui_mod.opl_theme, "dialogue")
         self.mocks["askyesno"] = patcher.start()
         self.addCleanup(patcher.stop)
+        # Les chemins d'ECHEC passent desormais par opl_theme.message : il
+        # remplace showerror et une partie des showwarning. Signature
+        # (parent, titre, texte) — le titre est en position 1, pas 0.
+        patcher = mock.patch.object(gui_mod.opl_theme, "message")
+        self.mocks["message"] = patcher.start()
+        self.addCleanup(patcher.stop)
 
         self.app = gui_mod.GuideExpressApp()
         self.addCleanup(self.app.destroy)
@@ -197,7 +231,7 @@ class ReviewViewCorruptedImageTestCase(_RealAppTestCase):
 
         # Un avertissement AGREGE (un seul messagebox, pas un par etape) a
         # bien ete affiche a la fin de la construction.
-        self.mocks["showwarning"].assert_called_once()
+        self.mocks["message"].assert_called_once()
 
     def test_reopen_session_with_a_corrupted_step_survives_end_to_end(self):
         # Reproduction fidele du scenario exact de l'audit : passe par
@@ -227,7 +261,7 @@ class ReviewViewCorruptedImageTestCase(_RealAppTestCase):
 
         self.assertEqual(len(self.app.steps), 3)  # aucune etape ecartee : le fichier EXISTE (0 octet, pas absent)
         self.assertEqual(len(self.app._export_buttons), 3)
-        self.assertTrue(self.mocks["showwarning"].called)
+        self.assertTrue(self.mocks["message"].called)
 
 
 @unittest.skipUnless(_TK_AVAILABLE, "Aucun affichage Tk disponible dans cet environnement.")
@@ -694,7 +728,7 @@ class CreateAndStartRecorderTestCase(_RealAppTestCase):
         self.assertEqual(recorder.target_dir, target_dir)
         # Chemin de succes : le HUD reste ouvert, aucune erreur affichee.
         self.assertIsNotNone(self.app.hud)
-        self.mocks["showerror"].assert_not_called()
+        self.mocks["message"].assert_not_called()
 
     def test_returns_none_and_recovers_ui_on_failure(self):
         self.app.withdraw()
@@ -713,10 +747,10 @@ class CreateAndStartRecorderTestCase(_RealAppTestCase):
         # retrouvait sans recours visible.
         self.assertIsNone(self.app.hud)
         self.assertEqual(self.app.state(), "normal")
-        self.mocks["showerror"].assert_called_once()
-        args, _kwargs = self.mocks["showerror"].call_args
-        self.assertEqual(args[0], "Titre d'erreur")
-        self.assertIn("Intro d'erreur", args[1])
+        self.mocks["message"].assert_called_once()
+        args, _kwargs = self.mocks["message"].call_args
+        self.assertEqual(args[1], "Titre d'erreur")
+        self.assertIn("Intro d'erreur", args[2])
 
 
 @unittest.skipUnless(_TK_AVAILABLE, "Aucun affichage Tk disponible dans cet environnement.")
